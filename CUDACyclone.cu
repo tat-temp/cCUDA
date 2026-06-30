@@ -77,7 +77,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     const unsigned full_mask = 0xFFFFFFFFu;
     if (warp_found_ready(d_found_flag, full_mask, lane)) return;
 
-    const uint32_t target_prefix = c_target_prefix;
+    const uint32_t target_prefix = c_target_words[0];
 
     unsigned int local_hashes = 0;
 #ifdef EC_GEN_ONLY
@@ -115,17 +115,17 @@ __global__ void kernel_point_add_and_check_oneinv(
         if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
 
         {
-            uint8_t h20[20];
+            uint32_t h5[5];
 #ifndef EC_GEN_ONLY
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-            getHash160_33_from_limbs(prefix, x1, h20);
-            bool pref = hash160_prefix_equals(h20, target_prefix);
+            getHash160_33_from_limbs(prefix, x1, h5);
+            bool pref = hash160_prefix_equals(h5, target_prefix);
 #else
             ec_acc ^= x1[0]^x1[1]^x1[2]^x1[3];
             bool pref = false;
 #endif
             if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                if (pref && hash160_matches_full(h5, c_target_words)) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         d_found_result->threadId = (int)gid;
                         d_found_result->iter     = 0;
@@ -195,15 +195,15 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
 #ifndef EC_GEN_ONLY
-                uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-                bool pref = hash160_prefix_equals(h20, target_prefix);
+                uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
+                bool pref = hash160_prefix_equals(h5, target_prefix);
 #else
-                uint8_t h20[20];
+                uint32_t h5[5];
                 ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
                 bool pref = false;
 #endif
                 if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                    if (pref && hash160_matches_full(h5, c_target_words)) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t addv=(uint64_t)(i+1);
@@ -245,15 +245,15 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
 #ifndef EC_GEN_ONLY
-                uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-                bool pref = hash160_prefix_equals(h20, target_prefix);
+                uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
+                bool pref = hash160_prefix_equals(h5, target_prefix);
 #else
-                uint8_t h20[20];
+                uint32_t h5[5];
                 ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
                 bool pref = false;
 #endif
                 if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                    if (pref && hash160_matches_full(h5, c_target_words)) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t sub=(uint64_t)(i+1);
@@ -305,15 +305,15 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
 #ifndef EC_GEN_ONLY
-            uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-            bool pref = hash160_prefix_equals(h20, target_prefix);
+            uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
+            bool pref = hash160_prefix_equals(h5, target_prefix);
 #else
-            uint8_t h20[20];
+            uint32_t h5[5];
             ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
             bool pref = false;
 #endif
             if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                if (pref && hash160_matches_full(h5, c_target_words)) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                         uint64_t sub=(uint64_t)half;
@@ -617,12 +617,13 @@ int main(int argc, char** argv) {
     }
 
     {
-        uint32_t prefix_le = (uint32_t)target_hash160[0]
-                           | ((uint32_t)target_hash160[1] << 8)
-                           | ((uint32_t)target_hash160[2] << 16)
-                           | ((uint32_t)target_hash160[3] << 24);
-        cudaMemcpyToSymbol(c_target_prefix, &prefix_le, sizeof(prefix_le));
-        cudaMemcpyToSymbol(c_target_hash160, target_hash160, 20);
+        uint32_t target_words[5];
+        for (int i = 0; i < 5; ++i)
+            target_words[i] = (uint32_t)target_hash160[4*i+0]
+                            | ((uint32_t)target_hash160[4*i+1] << 8)
+                            | ((uint32_t)target_hash160[4*i+2] << 16)
+                            | ((uint32_t)target_hash160[4*i+3] << 24);
+        cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
     }
 
     uint64_t *d_start_scalars=nullptr, *d_Px=nullptr, *d_Py=nullptr, *d_Rx=nullptr, *d_Ry=nullptr, *d_counts256=nullptr;

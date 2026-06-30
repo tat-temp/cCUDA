@@ -5,5 +5,5 @@
 #include <cuda_runtime.h>
 #include <cstring>
 
-__device__ void getHash160_33_from_limbs(uint8_t prefix02_03, const uint64_t x_be_limbs[4], uint8_t out20[20]);
+__device__ void getHash160_33_from_limbs(uint8_t prefix02_03, const uint64_t x_be_limbs[4], uint32_t out5[5]);
 #endif

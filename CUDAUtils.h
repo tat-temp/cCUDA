@@ -70,31 +70,24 @@ std::string formatHex256(const uint64_t limbs[4]) {
     return oss.str();
 }
 
-static __device__ __forceinline__ uint32_t load_u32_le(const uint8_t* p) {
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
+// Hash160 compares run in 32-bit word space (5 words) to avoid serializing each
+// candidate hash to 20 bytes and reloading it across the getHash160 call boundary.
+// h5[i] is the i-th hash160 word in the same LE interpretation the byte form used,
+// so word compares are bit-for-bit equivalent to the old byte-wise compares.
+static __device__ __forceinline__ bool hash160_prefix_equals(
+    const uint32_t h5[5], uint32_t target_prefix)
+{
+    return h5[0] == target_prefix;
 }
 
-static __device__ __forceinline__ bool hash160_matches_prefix_then_full(
-    const uint8_t* __restrict__ h,       
-    const uint8_t* __restrict__ target,  
-    const uint32_t target_prefix_le)
+static __device__ __forceinline__ bool hash160_matches_full(
+    const uint32_t h5[5], const uint32_t target_w[5])
 {
-    if (load_u32_le(h) != target_prefix_le) return false;
 #pragma unroll
-    for (int k = 4; k < 20; ++k) {
-        if (h[k] != target[k]) return false;
+    for (int k = 0; k < 5; ++k) {
+        if (h5[k] != target_w[k]) return false;
     }
     return true;
-}
-
-static __device__ __forceinline__ bool hash160_prefix_equals(
-    const uint8_t* __restrict__ h,
-    uint32_t target_prefix)
-{
-    return load_u32_le(h) == target_prefix;
 }
 
 // вспомогательная: a (256-бит) >= b (u64)?

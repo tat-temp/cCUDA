@@ -346,7 +346,7 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
 }
 
 __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_le[16],
-                                                            uint8_t ripemd20[20])
+                                                            uint32_t out5[5])
 {
     sha_state_le[8]  = 0x00000080u;
 #pragma unroll
@@ -357,33 +357,24 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     uint32_t s[5];
     RIPEMD160Initialize(s);
     RIPEMD160Transform(s, sha_state_le);
+    // out5[i] == load_u32_le(old ripemd20 + 4*i): the LE byte serialization was a no-op
+    // round-trip, so the state words are exactly the words the comparison reads back.
 #pragma unroll
-    for (int i = 0; i < 5; ++i) {
-        ripemd20[4*i+0] = (uint8_t)(s[i] >> 0);
-        ripemd20[4*i+1] = (uint8_t)(s[i] >> 8);
-        ripemd20[4*i+2] = (uint8_t)(s[i] >>16);
-        ripemd20[4*i+3] = (uint8_t)(s[i] >>24);
-    }
+    for (int i = 0; i < 5; ++i) out5[i] = s[i];
 }
 
 __device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
                                                       const uint64_t x_be_limbs[4],
-                                                      uint8_t out20[20])
+                                                      uint32_t out5[5])
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
 #ifndef SHA_ONLY
-    RIPEMD160_from_SHA256_state(sha_state, out20);
+    RIPEMD160_from_SHA256_state(sha_state, out5);
 #else
-    // SHA-only benchmark (-DSHA_ONLY): skip RIPEMD-160; derive out20 from the SHA-256
-    // words so the SHA-256 work stays live and the 20-byte buffer is still written.
+    // SHA-only benchmark (-DSHA_ONLY): skip RIPEMD-160; emit the SHA-256 words directly
+    // so the SHA-256 work stays live and out5 is still written.
 #pragma unroll
-    for (int i = 0; i < 5; ++i) {
-        uint32_t v = sha_state[i];
-        out20[4*i+0] = (uint8_t)(v >> 0);
-        out20[4*i+1] = (uint8_t)(v >> 8);
-        out20[4*i+2] = (uint8_t)(v >> 16);
-        out20[4*i+3] = (uint8_t)(v >> 24);
-    }
+    for (int i = 0; i < 5; ++i) out5[i] = sha_state[i];
 #endif
 }
