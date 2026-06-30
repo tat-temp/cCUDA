@@ -349,5 +349,18 @@ __device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
+#ifndef SHA_ONLY
     RIPEMD160_from_SHA256_state(sha_state, out20);
+#else
+    // SHA-only benchmark (-DSHA_ONLY): skip RIPEMD-160; derive out20 from the SHA-256
+    // words so the SHA-256 work stays live and the 20-byte buffer is still written.
+#pragma unroll
+    for (int i = 0; i < 5; ++i) {
+        uint32_t v = sha_state[i];
+        out20[4*i+0] = (uint8_t)(v >> 0);
+        out20[4*i+1] = (uint8_t)(v >> 8);
+        out20[4*i+2] = (uint8_t)(v >> 16);
+        out20[4*i+3] = (uint8_t)(v >> 24);
+    }
+#endif
 }
