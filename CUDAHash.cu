@@ -15,13 +15,36 @@ __device__ __forceinline__ uint32_t ror32(uint32_t x, int n)
 #endif
 }
 
-__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(x, 2) ^ ror32(x, 13) ^ ror32(x, 22); }
-__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(x, 6) ^ ror32(x, 11) ^ ror32(x, 25); }
-__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3); }
-__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return ror32(x,17) ^ ror32(x, 19) ^ (x >>10); }
+// a ^ b ^ c folded into one LOP3 (truth table 0x96). ptxas usually does this anyway;
+// writing it explicitly guarantees the single instruction.
+__device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r;
+#else
+    return a ^ b ^ c;
+#endif
+}
 
-__device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){ return (x & y) ^ (~x & z); }
-__device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){ return (x & y) | (x & z) | (y & z); }
+__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return xor3(ror32(x, 2), ror32(x, 13), ror32(x, 22)); }
+__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return xor3(ror32(x, 6), ror32(x, 11), ror32(x, 25)); }
+__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
+__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
+
+// Ch = (x&y)^(~x&z)  -> LOP3 truth table 0xCA;  Maj = (x&y)|(x&z)|(y&z) -> 0xE8. One instruction each.
+__device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
+#else
+    return (x & y) ^ (~x & z);
+#endif
+}
+__device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
+#else
+    return (x & y) | (x & z) | (y & z);
+#endif
+}
 
 __device__ __constant__ uint32_t K[64] = {
     0x428A2F98,0x71374491,0xB5C0FBCF,0xE9B5DBA5,0x3956C25B,0x59F111F1,0x923F82A4,0xAB1C5ED5,
@@ -292,7 +315,7 @@ __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
 
 
 __device__ __forceinline__ uint32_t bswap32(uint32_t x){
-    return ((x & 0x000000FFu) << 24) | ((x & 0x0000FF00u) << 8) | ((x & 0x00FF0000u) >> 8) | ((x & 0xFF000000u) >> 24);
+    return __byte_perm(x, 0, 0x0123);   // reverse the 4 bytes in one PRMT
 }
 __device__ __forceinline__ uint32_t pack_be4(uint8_t a,uint8_t b,uint8_t c,uint8_t d){
     return ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)c<<8)|((uint32_t)d);
