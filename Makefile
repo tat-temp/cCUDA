@@ -17,9 +17,16 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(OBJ) -o $@ $(LDFLAGS)
 
+# EC-generation-only benchmark: the identical kernel built with -DEC_GEN_ONLY, which
+# skips SHA-256/RIPEMD-160 + the address match (a tiny XOR sink keeps the EC math live).
+# Use `make clean && make ecgen` after header edits (Makefile doesn't track header deps).
+ecgen: CUDACyclone-ecgen
+CUDACyclone-ecgen: $(SRC)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DEC_GEN_ONLY $(SRC) -o $@ $(LDFLAGS)
+
 %.o: %.cu
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(TARGET) $(OBJ)
+	rm -f $(TARGET) CUDACyclone-ecgen $(OBJ)
 

@@ -80,6 +80,9 @@ __global__ void kernel_point_add_and_check_oneinv(
     const uint32_t target_prefix = c_target_prefix;
 
     unsigned int local_hashes = 0;
+#ifdef EC_GEN_ONLY
+    uint64_t ec_acc = 0;   // EC-generation-only bench: observable sink so the EC math isn't DCE'd when hashing is skipped
+#endif
     #define FLUSH_THRESHOLD 65536u
     #define WARP_FLUSH_HASHES() do { \
         unsigned long long v = warp_reduce_add_ull((unsigned long long)local_hashes); \
@@ -113,9 +116,14 @@ __global__ void kernel_point_add_and_check_oneinv(
 
         {
             uint8_t h20[20];
+#ifndef EC_GEN_ONLY
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             getHash160_33_from_limbs(prefix, x1, h20);
             bool pref = hash160_prefix_equals(h20, target_prefix);
+#else
+            ec_acc ^= x1[0]^x1[1]^x1[2]^x1[3];
+            bool pref = false;
+#endif
             if (__any_sync(full_mask, pref)) {
                 if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
@@ -186,8 +194,14 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
+#ifndef EC_GEN_ONLY
                 uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
                 bool pref = hash160_prefix_equals(h20, target_prefix);
+#else
+                uint8_t h20[20];
+                ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
+                bool pref = false;
+#endif
                 if (__any_sync(full_mask, pref)) {
                     if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
@@ -230,8 +244,14 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
+#ifndef EC_GEN_ONLY
                 uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
                 bool pref = hash160_prefix_equals(h20, target_prefix);
+#else
+                uint8_t h20[20];
+                ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
+                bool pref = false;
+#endif
                 if (__any_sync(full_mask, pref)) {
                     if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
@@ -284,8 +304,14 @@ __global__ void kernel_point_add_and_check_oneinv(
             _ModMult(s, s, lam);
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
+#ifndef EC_GEN_ONLY
             uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
             bool pref = hash160_prefix_equals(h20, target_prefix);
+#else
+            uint8_t h20[20];
+            ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
+            bool pref = false;
+#endif
             if (__any_sync(full_mask, pref)) {
                 if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
@@ -356,6 +382,9 @@ __global__ void kernel_point_add_and_check_oneinv(
     if ((rem[0] | rem[1] | rem[2] | rem[3]) != 0ull) {
         atomicAdd(d_any_left, 1u);
     }
+#ifdef EC_GEN_ONLY
+    if (ec_acc == 0x9E3779B97F4A7C15ULL) d_found_result->scalar[0] = ec_acc;  // observable sink: forces the EC math to be computed
+#endif
 
     WARP_FLUSH_HASHES();
     #undef MAYBE_WARP_FLUSH
