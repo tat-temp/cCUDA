@@ -15,13 +15,36 @@ __device__ __forceinline__ uint32_t ror32(uint32_t x, int n)
 #endif
 }
 
-__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(x, 2) ^ ror32(x, 13) ^ ror32(x, 22); }
-__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(x, 6) ^ ror32(x, 11) ^ ror32(x, 25); }
-__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3); }
-__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return ror32(x,17) ^ ror32(x, 19) ^ (x >>10); }
+// a ^ b ^ c folded into one LOP3 (truth table 0x96). ptxas usually does this anyway;
+// writing it explicitly guarantees the single instruction.
+__device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r;
+#else
+    return a ^ b ^ c;
+#endif
+}
 
-__device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){ return (x & y) ^ (~x & z); }
-__device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){ return (x & y) | (x & z) | (y & z); }
+__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return xor3(ror32(x, 2), ror32(x, 13), ror32(x, 22)); }
+__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return xor3(ror32(x, 6), ror32(x, 11), ror32(x, 25)); }
+__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
+__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
+
+// Ch = (x&y)^(~x&z)  -> LOP3 truth table 0xCA;  Maj = (x&y)|(x&z)|(y&z) -> 0xE8. One instruction each.
+__device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
+#else
+    return (x & y) ^ (~x & z);
+#endif
+}
+__device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){
+#if __CUDA_ARCH__ >= 500
+    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
+#else
+    return (x & y) | (x & z) | (y & z);
+#endif
+}
 
 __device__ __constant__ uint32_t K[64] = {
     0x428A2F98,0x71374491,0xB5C0FBCF,0xE9B5DBA5,0x3956C25B,0x59F111F1,0x923F82A4,0xAB1C5ED5,
@@ -290,154 +313,9 @@ __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
     s[4] = t + b1 + c2;
 }
 
-__device__ void getSHA256_33bytes(const uint8_t* pubkey33, uint8_t sha[32]);
-__device__ void getRIPEMD160_32bytes(const uint8_t* sha, uint8_t ripemd[20]);
-
-__device__ __forceinline__ void getSHA256_33bytes(const uint8_t* pubkey33, uint8_t sha[32]) {
-    uint32_t M[16];
-#pragma unroll
-    for (int i = 0; i < 16; ++i) M[i] = 0;
-
-#pragma unroll
-    for (int i = 0; i < 33; ++i) {
-        M[i >> 2] |= (uint32_t)pubkey33[i] << (24 - ((i & 3) << 3));
-    }
-    M[8] |= (uint32_t)0x80 << (24 - ((33 & 3) << 3));
-    M[14] = 0;
-    M[15] = 33u * 8u;
-
-    uint32_t state[8];
-    SHA256Initialize(state);
-    SHA256Transform(state, M);
-
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        sha[4 * i + 0] = (uint8_t)(state[i] >> 24);
-        sha[4 * i + 1] = (uint8_t)(state[i] >> 16);
-        sha[4 * i + 2] = (uint8_t)(state[i] >> 8);
-        sha[4 * i + 3] = (uint8_t)(state[i] >> 0);
-    }
-}
-__device__ __forceinline__ void getRIPEMD160_32bytes(const uint8_t* sha, uint8_t ripemd[20])
-{
-    uint8_t block[64] = {0};
-    
-    for (int i = 0; i < 32; i++) {
-    block[i] = sha[i];
-    }  
-    block[32] = 0x80;
-    const uint32_t bitLen = 256;  
-
-    block[56] = bitLen & 0xFF;
-    block[57] = (bitLen >> 8) & 0xFF;
-    block[58] = (bitLen >> 16) & 0xFF;
-    block[59] = (bitLen >> 24) & 0xFF;
-
-    uint32_t W[16];
-    
-    for (int i = 0; i < 16; i++) {
-        W[i] = ((uint32_t)block[4*i+3] << 24) |
-               ((uint32_t)block[4*i+2] << 16) |
-               ((uint32_t)block[4*i+1] << 8) |
-               ((uint32_t)block[4*i]);
-    }
-
-    uint32_t state[5];
-    RIPEMD160Initialize(state);
-    RIPEMD160Transform(state, W);
-   
-    for (int i = 0; i < 5; i++) {
-        ripemd[4*i]   = (state[i] >> 0) & 0xFF;
-        ripemd[4*i+1] = (state[i] >> 8) & 0xFF;
-        ripemd[4*i+2] = (state[i] >> 16) & 0xFF;
-        ripemd[4*i+3] = (state[i] >> 24) & 0xFF;
-    }
-}
-
-__device__ void getHash160_33bytes(const uint8_t* pubkey33, uint8_t* hash20);
-
-__device__  void getHash160_33bytes(const uint8_t* pubkey33, uint8_t* hash20)
-{
-    uint8_t sha256[32];
-    getSHA256_33bytes(pubkey33, sha256);
-    getRIPEMD160_32bytes(sha256, hash20);
-}
-
-__device__ __forceinline__ uint64_t loadU64BE(const uint8_t* p) {
-    return ((uint64_t)p[0] << 56) |
-           ((uint64_t)p[1] << 48) |
-           ((uint64_t)p[2] << 40) |
-           ((uint64_t)p[3] << 32) |
-           ((uint64_t)p[4] << 24) |
-           ((uint64_t)p[5] << 16) |
-           ((uint64_t)p[6] <<  8) |
-           ((uint64_t)p[7] <<  0);
-}
-
-__device__ __forceinline__ void storeU64BE(uint8_t* p, uint64_t x) {
-    p[0] = (uint8_t)(x >> 56);
-    p[1] = (uint8_t)(x >> 48);
-    p[2] = (uint8_t)(x >> 40);
-    p[3] = (uint8_t)(x >> 32);
-    p[4] = (uint8_t)(x >> 24);
-    p[5] = (uint8_t)(x >> 16);
-    p[6] = (uint8_t)(x >>  8);
-    p[7] = (uint8_t)(x >>  0);
-}
-
-__device__ __forceinline__ void addBigEndian256(uint8_t* key33, uint64_t offset)
-{
-    uint8_t* coord = key33 + 1;
-    uint64_t x0 = loadU64BE(coord);        
-    uint64_t x1 = loadU64BE(coord + 8);
-    uint64_t x2 = loadU64BE(coord + 16);
-    uint64_t x3 = loadU64BE(coord + 24);     
-
-    uint64_t new_x3 = x3 + offset;
-
-    if (new_x3 >= x3) {
-        x3 = new_x3;
-    }
-    else {
-        x3 = new_x3;
-        uint64_t new_x2 = x2 + 1;
-        if (new_x2 >= x2) {
-            x2 = new_x2;
-        }
-        else {
-            x2 = new_x2;
-            uint64_t new_x1 = x1 + 1;
-            if (new_x1 >= x1) {
-                x1 = new_x1;
-            }
-            else {
-                x1 = new_x1;
-                x0 = x0 + 1;
-            }
-        }
-    }
-
-    storeU64BE(coord,     x0);
-    storeU64BE(coord + 8, x1);
-    storeU64BE(coord + 16, x2);
-    storeU64BE(coord + 24, x3);
-}
-
-__device__ __forceinline__ bool compare20(const uint8_t* h, const uint8_t* ref) {
-    ulonglong2 a, b;
-    uint32_t c, d;
-    
-    memcpy(&a, h, sizeof(ulonglong2));
-    memcpy(&b, ref, sizeof(ulonglong2));
-    
-    memcpy(&c, h + 16, sizeof(uint32_t));
-    memcpy(&d, ref + 16, sizeof(uint32_t));
-    
-    return (a.x == b.x) && (a.y == b.y) && (c == d);
-}
 
 __device__ __forceinline__ uint32_t bswap32(uint32_t x){
-    return ((x & 0x000000FFu) << 24) | ((x & 0x0000FF00u) << 8) | ((x & 0x00FF0000u) >> 8) | ((x & 0xFF000000u) >> 24);
+    return __byte_perm(x, 0, 0x0123);   // reverse the 4 bytes in one PRMT
 }
 __device__ __forceinline__ uint32_t pack_be4(uint8_t a,uint8_t b,uint8_t c,uint8_t d){
     return ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)c<<8)|((uint32_t)d);
@@ -468,7 +346,7 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
 }
 
 __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_le[16],
-                                                            uint8_t ripemd20[20])
+                                                            uint32_t out5[5])
 {
     sha_state_le[8]  = 0x00000080u;
 #pragma unroll
@@ -479,20 +357,24 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     uint32_t s[5];
     RIPEMD160Initialize(s);
     RIPEMD160Transform(s, sha_state_le);
+    // out5[i] == load_u32_le(old ripemd20 + 4*i): the LE byte serialization was a no-op
+    // round-trip, so the state words are exactly the words the comparison reads back.
 #pragma unroll
-    for (int i = 0; i < 5; ++i) {
-        ripemd20[4*i+0] = (uint8_t)(s[i] >> 0);
-        ripemd20[4*i+1] = (uint8_t)(s[i] >> 8);
-        ripemd20[4*i+2] = (uint8_t)(s[i] >>16);
-        ripemd20[4*i+3] = (uint8_t)(s[i] >>24);
-    }
+    for (int i = 0; i < 5; ++i) out5[i] = s[i];
 }
 
 __device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
                                                       const uint64_t x_be_limbs[4],
-                                                      uint8_t out20[20])
+                                                      uint32_t out5[5])
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
-    RIPEMD160_from_SHA256_state(sha_state, out20);
+#ifndef SHA_ONLY
+    RIPEMD160_from_SHA256_state(sha_state, out5);
+#else
+    // SHA-only benchmark (-DSHA_ONLY): skip RIPEMD-160; emit the SHA-256 words directly
+    // so the SHA-256 work stays live and out5 is still written.
+#pragma unroll
+    for (int i = 0; i < 5; ++i) out5[i] = sha_state[i];
+#endif
 }

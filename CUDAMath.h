@@ -58,24 +58,6 @@ __device__ __constant__ uint64_t MSK62 = 0x3FFFFFFFFFFFFFFFULL;
   USUBC1(r[3], 0xFFFFFFFFFFFFFFFFULL); \
   USUB1(r[4], 0ULL);}
 
-#define Sub2(r,a,b)  {\
-  USUBO(r[0], a[0], b[0]); \
-  USUBC(r[1], a[1], b[1]); \
-  USUBC(r[2], a[2], b[2]); \
-  USUBC(r[3], a[3], b[3]); \
-  USUB(r[4], a[4], b[4]);}
-
-#define Sub1(r,a) {\
-  USUBO1(r[0], a[0]); \
-  USUBC1(r[1], a[1]); \
-  USUBC1(r[2], a[2]); \
-  USUBC1(r[3], a[3]); \
-  USUB1(r[4], a[4]);}
-
-#define Add128(r,a) { \
-  UADDO1((r)[0], (a)[0]); \
-  UADD1((r)[1], (a)[1]);}
-
 #define Neg(r) {\
 USUBO(r[0],0ULL,r[0]); \
 USUBC(r[1],0ULL,r[1]); \
@@ -99,20 +81,6 @@ USUB(r[4],0ULL,r[4]); }
   (r)[2] = (a)[2]; \
   (r)[3] = (a)[3]; \
   (r)[4] = (a)[4];}
-
-#define _LoadI64(r, a, carry) {\
-  (r)[0] = a; \
-  (r)[1] = a>>63; \
-  (r)[2] = (r)[1]; \
-  (r)[3] = (r)[1]; \
-  (r)[4] = (r)[1];\
-  carry = (r)[1];}
-
-#define Load256(r, a) {\
-  (r)[0] = (a)[0]; \
-  (r)[1] = (a)[1]; \
-  (r)[2] = (a)[2]; \
-  (r)[3] = (a)[3];}
 
 __device__ void ShiftR62(uint64_t r[5]) {
 
@@ -238,20 +206,6 @@ __device__ void ModNeg256(uint64_t *r,uint64_t *a) {
 
 }
 
-__device__ void ModNeg256(uint64_t *r) {
-
-  uint64_t t[4];
-  USUBO(t[0],0ULL,r[0]);
-  USUBC(t[1],0ULL,r[1]);
-  USUBC(t[2],0ULL,r[2]);
-  USUBC(t[3],0ULL,r[3]);
-  UADDO(r[0],t[0],0xFFFFFFFEFFFFFC2FULL);
-  UADDC(r[1],t[1],0xFFFFFFFFFFFFFFFFULL);
-  UADDC(r[2],t[2],0xFFFFFFFFFFFFFFFFULL);
-  UADD(r[3],t[3],0xFFFFFFFFFFFFFFFFULL);
-
-}
-
 __device__ void ModSub256(uint64_t *r,uint64_t *a,uint64_t *b) {
 
     uint64_t borrow;
@@ -290,37 +244,6 @@ __device__ void ModSub256(uint64_t* r,uint64_t* b) {
         UADD1(r[3], p[3]);
     }
 }
-
-#ifdef USE_SYMMETRY
-
-__device__ bool ModPositive256(uint64_t *r) {
-
-  if(r[3] > 0x7FFFFFFFFFFFFFFFULL) {
-    ModNeg256(r);
-    return true;
-  } else {
-    return false;
-  }
-
-}
-
-__device__ void ModNeg256Order(uint64_t* r) {
-
-  uint64_t t[4];
-  USUBO(t[0],0ULL,r[0]);
-  USUBC(t[1],0ULL,r[1]);
-  USUBC(t[2],0ULL,r[2]);
-  USUBC(t[3],0ULL,r[3]);
-  UADDO(r[0],t[0],_O[0]);
-  UADDC(r[1],t[1],_O[1]);
-  UADDC(r[2],t[2],_O[2]);
-  UADD(r[3],t[3],_O[3]);
-
-}
-
-
-
-#endif
 
 __device__ __forceinline__ uint32_t ctz(uint64_t x) {
   uint32_t n;
@@ -787,136 +710,6 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 
 #endif
 
-#if 0
-
-  uint64_t r0;
-  uint64_t r1;
-  uint64_t r3;
-  uint64_t r4;
-
-  uint64_t t1;
-  uint64_t t2;
-
-  uint64_t u10,u11;
-
-  UMULLO(r512[0],up[0],up[0]);
-  UMULHI(r1,up[0],up[0]);
-
-  UMULLO(r3,up[0],up[1]);
-  UMULHI(r4,up[0],up[1]);
-  UADDO1(r3,r3);
-  UADDC1(r4,r4);
-  UADD(t1,0x0ULL,0x0ULL);
-  UADDO1(r3,r1);
-  UADDC1(r4,0x0ULL);
-  UADD1(t1,0x0ULL);
-  r512[1] = r3;
-
-  UMULLO(r0,up[0],up[2]);
-  UMULHI(r1,up[0],up[2]);
-  UADDO1(r0,r0);
-  UADDC1(r1,r1);
-  UADD(t2,0x0ULL,0x0ULL);
-  UMULLO(u10,up[1],up[1]);
-  UMULHI(u11,up[1],up[1]);
-  UADDO1(r0,u10);
-  UADDC1(r1,u11);
-  UADD1(t2,0x0ULL);
-  UADDO1(r0,r4);
-  UADDC1(r1,t1);
-  UADD1(t2,0x0ULL);
-
-  r512[2] = r0;
-
-  UMULLO(r3,up[0],up[3]);
-  UMULHI(r4,up[0],up[3]);
-  UMULLO(u10,up[1],up[2]);
-  UMULHI(u11,up[1],up[2]);
-  UADDO1(r3,u10);
-  UADDC1(r4,u11);
-  UADD(t1,0x0ULL,0x0ULL);
-  t1 += t1;
-  UADDO1(r3,r3);
-  UADDC1(r4,r4);
-  UADD1(t1,0x0ULL);
-  UADDO1(r3,r1);
-  UADDC1(r4,t2);
-  UADD1(t1,0x0ULL);
-
-  r512[3] = r3;
-
-  UMULLO(r0,up[1],up[3]);
-  UMULHI(r1,up[1],up[3]);
-  UADDO1(r0,r0);
-  UADDC1(r1,r1);
-  UADD(t2,0x0ULL,0x0ULL);
-  UMULLO(u10,up[2],up[2]);
-  UMULHI(u11,up[2],up[2]);
-  UADDO1(r0,u10);
-  UADDC1(r1,u11);
-  UADD1(t2,0x0ULL);
-  UADDO1(r0,r4);
-  UADDC1(r1,t1);
-  UADD1(t2,0x0ULL);
-
-  r512[4] = r0;
-
-  UMULLO(r3,up[2],up[3]);
-  UMULHI(r4,up[2],up[3]);
-  UADDO1(r3,r3);
-  UADDC1(r4,r4);
-  UADD(t1,0x0ULL,0x0ULL);
-  UADDO1(r3,r1);
-  UADDC1(r4,t2);
-  UADD1(t1,0x0ULL);
-
-  r512[5] = r3;
-
-  UMULLO(r0,up[3],up[3]);
-  UMULHI(r1,up[3],up[3]);
-  UADDO1(r0,r4);
-  UADD1(r1,t1);
-  r512[6] = r0;
-
-  r512[7] = r1;
-
-  uint64_t z1,z2,z3,z4,z5,z6,z7,z8;
-
-  UMULLO(z3,r512[5],0x1000003d1ULL);
-  UMULHI(z4,r512[5],0x1000003d1ULL);
-  UMULLO(z5,r512[6],0x1000003d1ULL);
-  UMULHI(z6,r512[6],0x1000003d1ULL);
-  UMULLO(z7,r512[7],0x1000003d1ULL);
-  UMULHI(z8,r512[7],0x1000003d1ULL);
-  UMULLO(z1,r512[4],0x1000003d1ULL);
-  UMULHI(z2,r512[4],0x1000003d1ULL);
-  UADDO1(z1,r512[0]);
-  UADD1(z2,0x0ULL);
-
-
-  UADDO1(z2,r512[1]);
-  UADDC1(z4,r512[2]);
-  UADDC1(z6,r512[3]);
-  UADD1(z8,0x0ULL);
-
-  UADDO1(z3,z2);
-  UADDC1(z5,z4);
-  UADDC1(z7,z6);
-  UADD1(z8,0x0ULL);
-
-  UMULLO(u10,z8,0x1000003d1ULL);
-  UMULHI(u11,z8,0x1000003d1ULL);
-  UADDO1(z1,u10);
-  UADDC1(z3,u11);
-  UADDC1(z5,0x0ULL);
-  UADD1(z7,0x0ULL);
-
-  rp[0] = z1;
-  rp[1] = z3;
-  rp[2] = z5;
-  rp[3] = z7;
-
-#endif
 
 }
 
@@ -932,17 +725,6 @@ __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     out[1] = t[1];
     out[2] = t[2];
     out[3] = t[3];
-}
-
-__device__ void mul64x64_128(uint64_t a, uint64_t b, uint64_t* lo, uint64_t* hi) {
-    *lo = a * b;
-    *hi = __umul64hi(a, b);
-}
-
-__device__ uint64_t addWithCarry(uint64_t a, uint64_t b, uint64_t carry_in, uint64_t* carry_out) {
-    uint64_t sum = a + b + carry_in;
-    *carry_out = (sum < a) || (carry_in && sum == a) ? 1 : 0;
-    return sum;
 }
 
 // --- Secp256k1 block (point mult, doubling etc with a few helpers) -----------------------------
@@ -1053,14 +835,6 @@ __device__ void fieldSub(const uint64_t a[4], const uint64_t b[4], uint64_t out[
         tu = (__uint128_t)out[3] + SECP_P_LE[3] + carry;
         out[3] = (uint64_t)tu;
     }
-}
-
-__device__ void fieldNeg(const uint64_t a[4], uint64_t out[4]) {
-    if (fieldIsZero(a)) {
-        out[0]=out[1]=out[2]=out[3]=0ULL;
-        return;
-    }
-    fieldSub(SECP_P_LE, a, out);
 }
 
 __device__ __forceinline__ void fieldMul(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
