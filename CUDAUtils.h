@@ -70,10 +70,7 @@ std::string formatHex256(const uint64_t limbs[4]) {
     return oss.str();
 }
 
-// Hash160 compares run in 32-bit word space (5 words) to avoid serializing each
-// candidate hash to 20 bytes and reloading it across the getHash160 call boundary.
-// h5[i] is the i-th hash160 word in the same LE interpretation the byte form used,
-// so word compares are bit-for-bit equivalent to the old byte-wise compares.
+// h5/target_w hold a hash160 as 5 little-endian 32-bit words (word i = bytes [4i..4i+3]).
 static __device__ __forceinline__ bool hash160_prefix_equals(
     const uint32_t h5[5], uint32_t target_prefix)
 {

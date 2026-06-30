@@ -357,8 +357,7 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     uint32_t s[5];
     RIPEMD160Initialize(s);
     RIPEMD160Transform(s, sha_state_le);
-    // out5[i] == load_u32_le(old ripemd20 + 4*i): the LE byte serialization was a no-op
-    // round-trip, so the state words are exactly the words the comparison reads back.
+    // out5[i] is hash160 word i, little-endian (see CUDAUtils.h).
 #pragma unroll
     for (int i = 0; i < 5; ++i) out5[i] = s[i];
 }

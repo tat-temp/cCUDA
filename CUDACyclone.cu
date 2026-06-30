@@ -120,6 +120,9 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             getHash160_33_from_limbs(prefix, x1, h5);
             bool pref = hash160_prefix_equals(h5, target_prefix);
+#ifdef SHA_ONLY
+            pref = false;  // SHA_ONLY benchmark: h5 holds raw SHA-256 digest words, not a real hash160 -- never report a match
+#endif
 #else
             ec_acc ^= x1[0]^x1[1]^x1[2]^x1[3];
             bool pref = false;
@@ -127,8 +130,6 @@ __global__ void kernel_point_add_and_check_oneinv(
             if (__any_sync(full_mask, pref)) {
                 if (pref && hash160_matches_full(h5, c_target_words)) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                        d_found_result->threadId = (int)gid;
-                        d_found_result->iter     = 0;
 #pragma unroll
                         for (int k=0;k<4;++k) d_found_result->scalar[k]=S[k];
 #pragma unroll
@@ -197,6 +198,9 @@ __global__ void kernel_point_add_and_check_oneinv(
 #ifndef EC_GEN_ONLY
                 uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
                 bool pref = hash160_prefix_equals(h5, target_prefix);
+#ifdef SHA_ONLY
+                pref = false;  // SHA_ONLY benchmark: h5 holds raw SHA-256 digest words, not a real hash160 -- never report a match
+#endif
 #else
                 uint32_t h5[5];
                 ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
@@ -216,8 +220,6 @@ __global__ void kernel_point_add_and_check_oneinv(
                             uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
 #pragma unroll
                             for (int k=0;k<4;++k) d_found_result->Ry[k]=y3[k];
-                            d_found_result->threadId = (int)gid;
-                            d_found_result->iter     = 0;
                             __threadfence_system();
                             atomicExch(d_found_flag, FOUND_READY);
                         }
@@ -247,6 +249,9 @@ __global__ void kernel_point_add_and_check_oneinv(
 #ifndef EC_GEN_ONLY
                 uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
                 bool pref = hash160_prefix_equals(h5, target_prefix);
+#ifdef SHA_ONLY
+                pref = false;  // SHA_ONLY benchmark: h5 holds raw SHA-256 digest words, not a real hash160 -- never report a match
+#endif
 #else
                 uint32_t h5[5];
                 ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
@@ -265,8 +270,6 @@ __global__ void kernel_point_add_and_check_oneinv(
                             uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
 #pragma unroll
                             for (int k=0;k<4;++k) d_found_result->Ry[k]=y3[k];
-                            d_found_result->threadId = (int)gid;
-                            d_found_result->iter     = 0;
                             __threadfence_system();
                             atomicExch(d_found_flag, FOUND_READY);
                         }
@@ -307,6 +310,9 @@ __global__ void kernel_point_add_and_check_oneinv(
 #ifndef EC_GEN_ONLY
             uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
             bool pref = hash160_prefix_equals(h5, target_prefix);
+#ifdef SHA_ONLY
+            pref = false;  // SHA_ONLY benchmark: h5 holds raw SHA-256 digest words, not a real hash160 -- never report a match
+#endif
 #else
             uint32_t h5[5];
             ec_acc ^= px3[0]^px3[1]^px3[2]^px3[3]^(uint64_t)odd;
@@ -325,8 +331,6 @@ __global__ void kernel_point_add_and_check_oneinv(
                         uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
 #pragma unroll
                         for (int k=0;k<4;++k) d_found_result->Ry[k]=y3[k];
-                        d_found_result->threadId = (int)gid;
-                        d_found_result->iter     = 0;
                         __threadfence_system();
                         atomicExch(d_found_flag, FOUND_READY);
                     }
