@@ -32,17 +32,6 @@ __host__ __forceinline__ void sub256(const uint64_t a[4], const uint64_t b[4], u
     }
 }
 
-__host__ __forceinline__ void inc256(uint64_t a[4], uint64_t inc) {
-    __uint128_t cur = (__uint128_t)a[0] + inc;
-    a[0] = (uint64_t)cur;
-    uint64_t carry = (uint64_t)(cur >> 64);
-    for (int i = 1; i < 4 && carry; ++i) {
-        cur = (__uint128_t)a[i] + carry;
-        a[i] = (uint64_t)cur;
-        carry = (uint64_t)(cur >> 64);
-    }
-}
-
 __host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor, uint64_t quotient[4], uint64_t &remainder) {
     remainder = 0;
     for (int i = 3; i >= 0; --i) {
@@ -81,17 +70,6 @@ std::string formatHex256(const uint64_t limbs[4]) {
     return oss.str();
 }
 
-__device__ __forceinline__ void inc256_device(uint64_t a[4], uint64_t inc) {
-    unsigned __int128 cur = (unsigned __int128)a[0] + inc;
-    a[0] = (uint64_t)cur;
-    uint64_t carry = (uint64_t)(cur >> 64);
-    for (int i = 1; i < 4 && carry; ++i) {
-        cur = (unsigned __int128)a[i] + carry;
-        a[i] = (uint64_t)cur;
-        carry = (uint64_t)(cur >> 64);
-    }
-}
-
 static __device__ __forceinline__ uint32_t load_u32_le(const uint8_t* p) {
     return (uint32_t)p[0]
          | ((uint32_t)p[1] << 8)
@@ -110,10 +88,6 @@ static __device__ __forceinline__ bool hash160_matches_prefix_then_full(
         if (h[k] != target[k]) return false;
     }
     return true;
-}
-
-__device__ __forceinline__ bool eq256_u64(const uint64_t a[4], uint64_t b) {
-    return (a[0]==b) & (a[1]==0ull) & (a[2]==0ull) & (a[3]==0ull);
 }
 
 static __device__ __forceinline__ bool hash160_prefix_equals(

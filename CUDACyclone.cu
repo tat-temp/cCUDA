@@ -165,10 +165,6 @@ __global__ void kernel_point_add_and_check_oneinv(
         inverse[4] = 0ull;
         _ModInv(inverse);
 
-        uint64_t sy_neg[4], sx_neg[4];
-        ModNeg256(sy_neg, y1);
-        ModNeg256(sx_neg, x1);
-
         for (int i = 0; i < half - 1; ++i) {
             if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
 
