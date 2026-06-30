@@ -115,8 +115,6 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t h20[20];
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             getHash160_33_from_limbs(prefix, x1, h20);
-            ++local_hashes; MAYBE_WARP_FLUSH();
-
             bool pref = hash160_prefix_equals(h20, target_prefix);
             if (__any_sync(full_mask, pref)) {
                 if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
@@ -189,8 +187,6 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-                ++local_hashes; MAYBE_WARP_FLUSH();
-
                 bool pref = hash160_prefix_equals(h20, target_prefix);
                 if (__any_sync(full_mask, pref)) {
                     if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
@@ -235,8 +231,6 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-                ++local_hashes; MAYBE_WARP_FLUSH();
-
                 bool pref = hash160_prefix_equals(h20, target_prefix);
                 if (__any_sync(full_mask, pref)) {
                     if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
@@ -291,8 +285,6 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
             uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
-            ++local_hashes; MAYBE_WARP_FLUSH();
-
             bool pref = hash160_prefix_equals(h20, target_prefix);
             if (__any_sync(full_mask, pref)) {
                 if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
@@ -350,6 +342,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             for (int k=0;k<4 && addv;++k){ uint64_t old=S[k]; S[k]=old+addv; addv=(S[k]<old)?1ull:0ull; }
             sub256_u64_inplace(rem, (uint64_t)B);
         }
+        local_hashes += (unsigned int)B; MAYBE_WARP_FLUSH();  // count the whole batch at once (B | 65536 keeps the 64Ki flush cadence)
         ++batches_done;
     }
 
