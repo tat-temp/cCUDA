@@ -4,8 +4,6 @@
 #define FOUND_READY 2
 
 struct FoundResult {
-    int      threadId;
-    int      iter;
     uint64_t scalar[4];
     uint64_t Rx[4];
     uint64_t Ry[4];
