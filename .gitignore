@@ -3,3 +3,11 @@
 ################################################################################
 
 /.vs
+
+# RCKangaroo EC A/B artifacts (built + run on the GPU box, not committed)
+/CUDACyclone-ecbench
+/CUDACyclone-rckfield
+/CUDACyclone-rckinv
+/CUDACyclone-rckall
+/ab_ec_logs/
+/cyclone_tests_results.txt

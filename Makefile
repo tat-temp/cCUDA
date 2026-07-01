@@ -14,7 +14,7 @@ CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
 
-.PHONY: all clean ecgen shaonly ptxinfo sass resusage
+.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall
 
 all: $(TARGET)
 
@@ -39,6 +39,32 @@ CUDACyclone-shaonly: $(SRC) $(HDRS)
 %.o: %.cu $(HDRS)
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -c $< -o $@
 
+# ---- RCKangaroo EC-field A/B (branch rck-ec-ab) ---------------------------------------
+# See EC_AB_README.md. Compares RCKangaroo's field ops (third_party/RCKangaroo, GPLv3)
+# against CUDACyclone's own. ec_backend.cuh is the shim; -DUSE_RCK_FIELD / -DUSE_RCK_INV
+# swap them into the production kernel with zero call-site changes.
+RCK_HDR := third_party/RCKangaroo/RCGpuUtils.h ec_backend.cuh
+
+# Standalone per-op correctness (vs Python KATs) + throughput microbench. No hashing.
+ecbench: CUDACyclone-ecbench
+CUDACyclone-ecbench: ecbench.cu $(HDRS) $(RCK_HDR)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) ecbench.cu -o $@ $(LDFLAGS)
+
+# Full search binary, RCKangaroo mul+sqr swapped in (the throughput lever).
+rckfield: CUDACyclone-rckfield
+CUDACyclone-rckfield: $(SRC) $(HDRS) $(RCK_HDR)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_FIELD $(SRC) -o $@ $(LDFLAGS)
+
+# Full search binary, RCKangaroo safegcd inversion swapped in (amortized ~1/batch).
+rckinv: CUDACyclone-rckinv
+CUDACyclone-rckinv: $(SRC) $(HDRS) $(RCK_HDR)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_INV $(SRC) -o $@ $(LDFLAGS)
+
+# Full search binary, RCKangaroo mul+sqr+inv all swapped in.
+rckall: CUDACyclone-rckall
+CUDACyclone-rckall: $(SRC) $(HDRS) $(RCK_HDR)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_FIELD -DUSE_RCK_INV $(SRC) -o $@ $(LDFLAGS)
+
 # ---- Phase 0: codegen inspection (no effect on the shipped binary) --------------------
 # Surface what ptxas actually emitted so perf decisions (noinline, register budget,
 # constant folding) are made on evidence rather than inference. See phase0-inspect.sh for
@@ -60,4 +86,5 @@ sass: $(TARGET)
 	cuobjdump -sass $(TARGET)
 
 clean:
-	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly CUDACyclone-ptxinfo $(OBJ)
+	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly CUDACyclone-ptxinfo \
+	      CUDACyclone-ecbench CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall $(OBJ)
