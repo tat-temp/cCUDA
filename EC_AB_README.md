@@ -63,7 +63,27 @@ actually in `[P, 2^256)`, which is the meaningful edge.
 | `rckfield`  | `CUDACyclone-rckfield`    | RCKangaroo mul + sqr                        |
 | `rckinv`    | `CUDACyclone-rckinv`      | RCKangaroo inverse only                     |
 | `rckall`    | `CUDACyclone-rckall`      | RCKangaroo mul + sqr + inverse             |
+| `crfield`   | `CUDACyclone-crfield`     | **clean-room** 32-bit mul + sqr (license-clean; see below) |
 | `ecbench`   | `CUDACyclone-ecbench`     | standalone per-op correctness + microbench |
+
+## Clean-room multiply (`cr_field.cuh`, license-clean)
+
+`rckfield` proved RCKangaroo's 32-bit multiply is worth **+7%** end-to-end — but it's GPLv3.
+`cr_field.cuh` is a from-scratch reimplementation of *that idea* (256×256 via `mul.wide.u32`
++ the public secp256k1 pseudo-Mersenne reduction, folded with CUDACyclone's own convention),
+written without consulting RetiredC's source, so it can merge under this repo's license. It
+routes through `-DUSE_CR_FIELD` exactly like the RCK backend. The multiply's limb-carry logic
+was validated bit-exact against a Python reference over ~1.5M trials before being written.
+
+The make-or-break question is **register pressure**: the earlier Phase-3 32-bit attempt *spilled*
+(−9%/−16%) because it held split operand arrays past the 128-reg `(256,2)` cap. `cr_field.cuh`
+indexes operands in place to avoid that. `ab_ec.sh` prints `crfield`'s `cuobjdump -res-usage`
+right after building — **want `REG≤128, LOCAL:0, no spills`**. If it spills, rebuild with
+`CR_NOINLINE=1 make crfield` (moves the multiply's registers off the kernel via `__noinline__`)
+and re-measure. `ecbench` reports `cr/cyc` and `cr/rck` so you can see how close the clean-room
+multiply gets to RCKangaroo's in isolation; `ab_ec.sh` includes `crfield` in the end-to-end A/B.
+The clean-room does **not** reimplement the safegcd inverse (a separate ~+0.7%); `crfield` keeps
+CUDACyclone's inverse, targeting the ~+7% multiply win.
 
 ## How to run (on the RTX 5090 box)
 

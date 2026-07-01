@@ -4,6 +4,9 @@
 #if defined(USE_RCK_FIELD) || defined(USE_RCK_INV)
 #include "ec_backend.cuh"
 #endif
+#if defined(USE_CR_FIELD)
+#include "cr_field.cuh"   // clean-room 32-bit multiply (license-clean reproduction of the RCK win)
+#endif
 
 #define NBBLOCK 5
 #define BIFULLSIZE 40
@@ -516,7 +519,7 @@ __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
 }
 
 
-#ifndef USE_RCK_FIELD
+#if !defined(USE_RCK_FIELD) && !defined(USE_CR_FIELD)
 __device__ void _ModMult(uint64_t *r, uint64_t *a, uint64_t *b) {
 
   uint64_t r512[8];
@@ -724,11 +727,15 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 
 
 }
-#else  // USE_RCK_FIELD: route _ModMult/_ModSqr through RCKangaroo's MulModP/SqrModP
+#elif defined(USE_RCK_FIELD)  // route _ModMult/_ModSqr through RCKangaroo's MulModP/SqrModP
 __device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a, uint64_t* b){ rck::rmul(r,a,b); }
 __device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a){ rck::rmul(r,a); }
 __device__ __forceinline__ void _ModSqr(uint64_t* rp, const uint64_t* up){ rck::rsqr(rp,up); }
-#endif // USE_RCK_FIELD
+#else  // USE_CR_FIELD: route _ModMult/_ModSqr through the clean-room 32-bit multiply
+__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a, uint64_t* b){ cr::mul(r,a,b); }
+__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a){ cr::mul(r,a); }
+__device__ __forceinline__ void _ModSqr(uint64_t* rp, const uint64_t* up){ cr::sqr(rp,up); }
+#endif // field backend
 
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     uint64_t t[5];

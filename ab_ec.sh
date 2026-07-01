@@ -34,7 +34,7 @@ SKIP_PROOF="${SKIP_PROOF:-0}"
 PROOF_RANGE="${PROOF_RANGE:-8000000000:ffffffffff}"
 PROOF_GRID="${PROOF_GRID:-512,512}"
 # baseline MUST be first; the rest are compared against it.
-VARIANTS="${VARIANTS:-CUDACyclone CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall}"
+VARIANTS="${VARIANTS:-CUDACyclone CUDACyclone-rckfield CUDACyclone-crfield CUDACyclone-rckinv CUDACyclone-rckall}"
 
 LOGDIR="ab_ec_logs"; mkdir -p "$LOGDIR"
 say(){ printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
@@ -51,10 +51,15 @@ say "build (make clean; baseline + rck variants + ecbench)"
 make clean >/dev/null
 make            -j"$(nproc)" >/dev/null || { echo "build baseline FAILED"; exit 1; }
 make rckfield   -j"$(nproc)" >/dev/null || { echo "build rckfield FAILED";  exit 1; }
+make crfield    -j"$(nproc)" >/dev/null || { echo "build crfield FAILED";   exit 1; }
 make rckinv     -j"$(nproc)" >/dev/null || { echo "build rckinv FAILED";    exit 1; }
 make rckall     -j"$(nproc)" >/dev/null || { echo "build rckall FAILED";    exit 1; }
 make ecbench    -j"$(nproc)" >/dev/null || { echo "build ecbench FAILED";   exit 1; }
-echo "OK: $(ls -1 CUDACyclone CUDACyclone-rck* CUDACyclone-ecbench 2>/dev/null | tr '\n' ' ')"
+echo "OK: $(ls -1 CUDACyclone CUDACyclone-rck* CUDACyclone-crfield CUDACyclone-ecbench 2>/dev/null | tr '\n' ' ')"
+
+# register/spill check on the clean-room build (the make-or-break question — Phase 3 spilled)
+echo "-- clean-room kernel resource usage (want REG<=128, LOCAL:0, no spills):"
+cuobjdump -res-usage CUDACyclone-crfield 2>/dev/null | grep -A1 kernel_point_add | head -4 || true
 
 # --- 2a. per-op correctness (ecbench) --------------------------------------------------
 say "correctness: ecbench (per-op vs KATs, both backends)"

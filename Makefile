@@ -14,7 +14,7 @@ CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
 
-.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall
+.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall crfield
 
 all: $(TARGET)
 
@@ -65,6 +65,14 @@ rckall: CUDACyclone-rckall
 CUDACyclone-rckall: $(SRC) $(HDRS) $(RCK_HDR)
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_FIELD -DUSE_RCK_INV $(SRC) -o $@ $(LDFLAGS)
 
+# Full search binary, CLEAN-ROOM 32-bit multiply swapped in (cr_field.cuh, license-clean
+# reproduction of the RCK mul/sqr win; baseline inverse kept). Add CR_NOINLINE=1 to test
+# the __noinline__ fallback if the register check shows spills.
+CR_DEFS := -DUSE_CR_FIELD $(if $(CR_NOINLINE),-DCR_NOINLINE,)
+crfield: CUDACyclone-crfield
+CUDACyclone-crfield: $(SRC) $(HDRS) cr_field.cuh
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(CR_DEFS) $(SRC) -o $@ $(LDFLAGS)
+
 # ---- Phase 0: codegen inspection (no effect on the shipped binary) --------------------
 # Surface what ptxas actually emitted so perf decisions (noinline, register budget,
 # constant folding) are made on evidence rather than inference. See phase0-inspect.sh for
@@ -87,4 +95,5 @@ sass: $(TARGET)
 
 clean:
 	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly CUDACyclone-ptxinfo \
-	      CUDACyclone-ecbench CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall $(OBJ)
+	      CUDACyclone-ecbench CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall \
+	      CUDACyclone-crfield $(OBJ)
