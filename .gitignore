@@ -3,3 +3,10 @@
 ################################################################################
 
 /.vs
+
+# build artifacts (built on the GPU box, not committed)
+/CUDACyclone-legacy
+/CUDACyclone-ecgen
+/CUDACyclone-shaonly
+/CUDACyclone-ptxinfo
+/cyclone_tests_results.txt

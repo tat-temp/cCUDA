@@ -1,3 +1,8 @@
+// CUDACyclone — GPU secp256k1 Bitcoin-puzzle solver.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The default build's secp256k1 field arithmetic is RCKangaroo (c) 2024 RetiredCoder, GPLv3
+// (third_party/RCKangaroo/); the EC math lineage is VanitySearch (c) Jean-Luc Pons, GPLv3.
+// This program is therefore distributed under the GNU GPL v3 — see LICENSE.
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>

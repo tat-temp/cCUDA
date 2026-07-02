@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later  (see LICENSE; default build links GPLv3 RCKangaroo)
+//
+// Field-arithmetic backend. By DEFAULT the secp256k1 field ops (_ModMult / _ModSqr / _ModInv)
+// are RetiredCoder's RCKangaroo implementations (32-bit-limb MulModP/SqrModP + safegcd InvModP,
+// third_party/RCKangaroo/, GPLv3) -- measured ~+8.5% end-to-end on RTX 5090 vs the legacy path.
+// Build with -DUSE_CYCLONE_FIELD to fall back to CUDACyclone's own JeanLucPons-lineage ops. The
+// kernel call sites are untouched; only these definitions switch. See ec_backend.cuh and LICENSE.
+#ifndef USE_CYCLONE_FIELD
+#include "ec_backend.cuh"
+#endif
+
 #define NBBLOCK 5
 #define BIFULLSIZE 40
 
@@ -384,6 +395,7 @@ __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry) {
 
 }
 
+#ifdef USE_CYCLONE_FIELD
 __device__ __noinline__ void _ModInv(uint64_t* R) {
 
     // Compute modular inverse of R mop P (using 320bits signed integer)
@@ -489,6 +501,9 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
     Load(R, r);
 
 }
+#else  // default: RCKangaroo safegcd InvModP (GPLv3, third_party/RCKangaroo)
+__device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
+#endif
 
 #define UMultSpecial(r, a) {\
   uint64_t temp; /* Dichiarazione di temp qui */\
@@ -504,7 +519,7 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
   MADD(r[4], a[3], 0x1000003D1ULL, 0ULL); \
 }
 
-
+#ifdef USE_CYCLONE_FIELD
 __device__ void _ModMult(uint64_t *r, uint64_t *a, uint64_t *b) {
 
   uint64_t r512[8];
@@ -712,6 +727,11 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 
 
 }
+#else  // default: RCKangaroo MulModP/SqrModP (GPLv3, third_party/RCKangaroo)
+__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a, uint64_t* b){ rck::rmul(r,a,b); }
+__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a){ rck::rmul(r,a); }
+__device__ __forceinline__ void _ModSqr(uint64_t* rp, const uint64_t* up){ rck::rsqr(rp,up); }
+#endif // field backend
 
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     uint64_t t[5];

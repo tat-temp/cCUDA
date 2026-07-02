@@ -6,6 +6,13 @@ Leveraging **CUDA**, **warp-level parallelism**, and **batch EC operations**, Cy
 Secp256k1 math is based on the excellent work from [JeanLucPons/VanitySearch](https://github.com/JeanLucPons/VanitySearch), and [FixedPaul/VanitySearch-Bitcrack](https://github.com/FixedPaul) with major CUDA-specific modifications.  
 Special thanks to Jean-Luc Pons for his foundational contributions to the cryptographic community.
 
+The secp256k1 **field arithmetic** (modular multiply / square / inverse) now uses
+[RetiredC/RCKangaroo](https://github.com/RetiredC/RCKangaroo)'s implementations
+(vendored in `third_party/RCKangaroo/`) — a 32-bit-limb `MulModP`/`SqrModP` plus a safegcd
+`InvModP` — measured **~+8.5% end-to-end on an RTX 5090**. Build with `make legacy`
+(`-DUSE_CYCLONE_FIELD`) to fall back to the previous JeanLucPons-lineage field ops.
+**RCKangaroo and VanitySearch are GPLv3, so this project is licensed under GPL v3 — see [LICENSE](LICENSE).**
+
 Cyclone CUDA also is the **simplest CUDA-based project** for solving Satoshi puzzles on GPU.  
 It was designed with clarity and minimalism in mind — making it easy to **compile, understand, and run**, even for those new to CUDA programming.  
 
@@ -201,6 +208,7 @@ git clone https://github.com/Dookoo2/CUDACyclone.git
 make
 ```
 ## 🚧**Version**
+**V1.4**: RCKangaroo secp256k1 field arithmetic (32-bit `MulModP`/`SqrModP` + safegcd `InvModP`), ~+8.5% on RTX 5090; project relicensed under GPLv3.  
 **V1.3**: Full CUDA Kernel rewrite again for preventing key skipping.    
 **V1.2**: Full CUDA Kernel rewrite.  
 **V1.1**: Switch pGx/pGy to constant memory due to VRAM thermal throttling.  
@@ -210,3 +218,17 @@ make
 
 ## ✌️**TIPS**
 BTC: bc1qtq4y9l9ajeyxq05ynq09z8p52xdmk4hqky9c8n
+
+---
+
+## 📜 License
+
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+It incorporates and derives from GPLv3-licensed work:
+- **secp256k1 field arithmetic**: [RCKangaroo](https://github.com/RetiredC/RCKangaroo) © 2024 RetiredCoder (RC), GPLv3 — vendored under `third_party/RCKangaroo/` (`RCGpuUtils.h`, license text in `third_party/RCKangaroo/LICENSE.TXT`).
+- **EC math lineage**: [VanitySearch](https://github.com/JeanLucPons/VanitySearch) © Jean-Luc Pons, GPLv3.
+
+Because these components are GPLv3, any distributed build of CUDACyclone is a GPLv3 derivative
+and must be distributed under the same license, with source available. The `make legacy`
+(`-DUSE_CYCLONE_FIELD`) build still links the VanitySearch-lineage field math, so it is GPLv3 too.
