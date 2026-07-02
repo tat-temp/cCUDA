@@ -4,9 +4,8 @@
 #if defined(USE_RCK_FIELD) || defined(USE_RCK_INV)
 #include "ec_backend.cuh"
 #endif
-#if defined(USE_CR_FIELD)
-#include "cr_field.cuh"   // clean-room 32-bit multiply (license-clean reproduction of the RCK win)
-#endif
+// NOTE: cr_field.cuh (clean-room backend) is included further down, AFTER UMultSpecial,
+// because it reuses that reduction macro. See the include just before the _ModMult guard.
 
 #define NBBLOCK 5
 #define BIFULLSIZE 40
@@ -517,6 +516,12 @@ __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
   r[4] = temp + a[3]; \
   MADD(r[4], a[3], 0x1000003D1ULL, 0ULL); \
 }
+
+// Clean-room 32-bit multiply: reuses UMultSpecial/UADD* above (license-clean), so it is
+// pulled in here rather than at the top of the file. Only under -DUSE_CR_FIELD.
+#if defined(USE_CR_FIELD)
+#include "cr_field.cuh"
+#endif
 
 
 #if !defined(USE_RCK_FIELD) && !defined(USE_CR_FIELD)
