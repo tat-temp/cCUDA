@@ -128,12 +128,21 @@ __global__ void k_sqr_rck(const uint64_t* a, uint64_t* o, int N){
     #pragma unroll
     for(int k=0;k<4;++k) o[4*i+k]=r[k];
 }
-__global__ void k_mul_cr(const uint64_t* a, const uint64_t* b, uint64_t* o, int N){
+__global__ void k_mul_crA(const uint64_t* a, const uint64_t* b, uint64_t* o, int N){
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=N) return;
     uint64_t x[4],y[4],r[4];
     #pragma unroll
     for(int k=0;k<4;++k){ x[k]=a[4*i+k]; y[k]=b[4*i+k]; }
-    cr::mul(r,x,y);
+    cr::mulA(r,x,y);
+    #pragma unroll
+    for(int k=0;k<4;++k) o[4*i+k]=r[k];
+}
+__global__ void k_mul_crD(const uint64_t* a, const uint64_t* b, uint64_t* o, int N){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=N) return;
+    uint64_t x[4],y[4],r[4];
+    #pragma unroll
+    for(int k=0;k<4;++k){ x[k]=a[4*i+k]; y[k]=b[4*i+k]; }
+    cr::mulD(r,x,y);
     #pragma unroll
     for(int k=0;k<4;++k) o[4*i+k]=r[k];
 }
@@ -280,13 +289,22 @@ __global__ void t_ec_rck(const uint64_t* seed, uint64_t* sink, int N, int iters)
     for(int it=0; it<iters; ++it){ EC_TWIN_BODY(rck::rmul, rck::rsqr) }
     sink[i]=x1[0]^x1[1]^x1[2]^x1[3]^y1[0]^dxi[0];
 }
-__global__ void t_mul_cr(const uint64_t* seed, const uint64_t* kk, uint64_t* sink, int N, int iters){
+__global__ void t_mul_crA(const uint64_t* seed, const uint64_t* kk, uint64_t* sink, int N, int iters){
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=N) return;
     uint64_t a[4],c[4];
     #pragma unroll
     for(int k=0;k<4;++k){ a[k]=seed[4*i+k]; c[k]=kk[k]; }
     #pragma unroll 1
-    for(int it=0; it<iters; ++it) cr::mul(a,a,c);
+    for(int it=0; it<iters; ++it) cr::mulA(a,a,c);
+    sink[i]=a[0]^a[1]^a[2]^a[3];
+}
+__global__ void t_mul_crD(const uint64_t* seed, const uint64_t* kk, uint64_t* sink, int N, int iters){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=N) return;
+    uint64_t a[4],c[4];
+    #pragma unroll
+    for(int k=0;k<4;++k){ a[k]=seed[4*i+k]; c[k]=kk[k]; }
+    #pragma unroll 1
+    for(int it=0; it<iters; ++it) cr::mulD(a,a,c);
     sink[i]=a[0]^a[1]^a[2]^a[3];
 }
 __global__ void t_ec_cr(const uint64_t* seed, uint64_t* sink, int N, int iters){
@@ -383,16 +401,18 @@ int main(int argc, char** argv){
         printf("[chk] %-7s N=%d  cyclone(inv*a==1)=%s  rck(inv*a==1)=%s  (fail cyc=%d rck=%d)  identical-bits cyc==rck: %d/%d\n",
                "invmod",N,badc?"FAIL":"OK",badr?"FAIL":"OK",badc,badr,agree,N);
     }
-    // clean-room backend (cr::mul / cr::sqr) vs the same independent host reference
+    // clean-room backends (prodA operand-scan, prodD Comba) vs the same independent host reference
     {
-        k_mul_cr<<<bl,tpb>>>(da,db,dout,N); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); CK(cudaMemcpy(hoc.data(),dout,4*N*8,cudaMemcpyDeviceToHost));
-        int bad=0,nc=0;
-        for(int i=0;i<N;++i){ uint64_t ref[4],cc[4]; host_mulmod(&ha[4*i],&hb[4*i],ref); memcpy(cc,&hoc[4*i],32); if(ge_p(cc))nc++; canon(cc); if(!eq4(cc,ref))bad++; }
-        printf("[chk] %-7s N=%d  cr_vs_ref=%s  (mismatch %d)  non-canonical>=P: %d\n","mul(cr)",N,bad?"FAIL":"OK",bad,nc);
-        k_sqr_cr<<<bl,tpb>>>(da,dout,N); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); CK(cudaMemcpy(hoc.data(),dout,4*N*8,cudaMemcpyDeviceToHost));
-        int bad2=0;
-        for(int i=0;i<N;++i){ uint64_t ref[4],cc[4]; host_mulmod(&ha[4*i],&ha[4*i],ref); memcpy(cc,&hoc[4*i],32); canon(cc); if(!eq4(cc,ref))bad2++; }
-        printf("[chk] %-7s N=%d  cr_vs_ref=%s  (mismatch %d)\n","sqr(cr)",N,bad2?"FAIL":"OK",bad2);
+        auto report_cr = [&](const char* name, int mode){   // mode 0=mul(a,b), 2=sqr(a,a)
+            int bad=0,nc=0;
+            for(int i=0;i<N;++i){ uint64_t ref[4],cc[4];
+                if(mode==0) host_mulmod(&ha[4*i],&hb[4*i],ref); else host_mulmod(&ha[4*i],&ha[4*i],ref);
+                memcpy(cc,&hoc[4*i],32); if(ge_p(cc))nc++; canon(cc); if(!eq4(cc,ref))bad++; }
+            printf("[chk] %-8s N=%d  cr_vs_ref=%s  (mismatch %d)  non-canonical>=P: %d\n",name,N,bad?"FAIL":"OK",bad,nc);
+        };
+        k_mul_crA<<<bl,tpb>>>(da,db,dout,N); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); CK(cudaMemcpy(hoc.data(),dout,4*N*8,cudaMemcpyDeviceToHost)); report_cr("mul(crA)",0);
+        k_mul_crD<<<bl,tpb>>>(da,db,dout,N); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); CK(cudaMemcpy(hoc.data(),dout,4*N*8,cudaMemcpyDeviceToHost)); report_cr("mul(crD)",0);
+        k_sqr_cr <<<bl,tpb>>>(da,dout,N);    CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); CK(cudaMemcpy(hoc.data(),dout,4*N*8,cudaMemcpyDeviceToHost)); report_cr("sqr(cr)",2);
     }
     // Lazy-INPUT edge: random inputs land in [0,P), so the [P,2^256) reduction band (width ~2^32)
     // is never exercised above. Feed a = P + r (r in [1, 2^256-P)) so both ops must reduce a
@@ -464,10 +484,13 @@ int main(int argc, char** argv){
     double e_2=timed("ec_rck",1,itEc,[&](int it){ t_ec_rck<<<T_bl,T_tpb>>>(tseed,tsink,(int)Nthreads,it); });
     printf("ecstep   cyclone %8.1f   rck %8.1f   rck/cyc %.3fx   (6mul+2sqr per +/- twin; sub via Cyclone)\n", e_1, e_2, e_2/e_1);
 
-    double mc=timed("mul_cr",1,itMul,[&](int it){ t_mul_cr<<<T_bl,T_tpb>>>(tseed,tk,tsink,(int)Nthreads,it); });
-    double ec=timed("ec_cr", 1,itEc,[&](int it){ t_ec_cr <<<T_bl,T_tpb>>>(tseed,tsink,(int)Nthreads,it); });
-    printf("clean-room mul %8.1f  cr/cyc %.3fx  cr/rck %.3fx   |   ecstep %8.1f  cr/cyc %.3fx  cr/rck %.3fx\n",
-           mc, mc/m1, mc/m2, ec, ec/e_1, ec/e_2);
+    double mcA=timed("mul_crA",1,itMul,[&](int it){ t_mul_crA<<<T_bl,T_tpb>>>(tseed,tk,tsink,(int)Nthreads,it); });
+    double mcD=timed("mul_crD",1,itMul,[&](int it){ t_mul_crD<<<T_bl,T_tpb>>>(tseed,tk,tsink,(int)Nthreads,it); });
+    double ecA=timed("ec_crA", 1,itEc,[&](int it){ t_ec_cr  <<<T_bl,T_tpb>>>(tseed,tsink,(int)Nthreads,it); });
+    printf("clean-room  mulA %8.1f (cr/cyc %.3fx cr/rck %.3fx)   mulD %8.1f (cr/cyc %.3fx cr/rck %.3fx)\n",
+           mcA, mcA/m1, mcA/m2, mcD, mcD/m1, mcD/m2);
+    printf("clean-room  ecstep(A) %8.1f (cr/cyc %.3fx cr/rck %.3fx)   [crfield defaults to mulA; -DCR_USE_D selects mulD]\n",
+           ecA, ecA/e_1, ecA/e_2);
 
     printf("\nInterpretation: ecstep reproduces the kernel's per-key blend (~3 mul : 1 sqr; sub NOT\n"
            "swapped, matching rckfield) so ecstep rck/cyc APPROXIMATES the mul/sqr-limited end-to-end\n"

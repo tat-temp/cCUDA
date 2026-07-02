@@ -14,7 +14,7 @@ CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
 
-.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall crfield
+.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall crfield crfieldD
 
 all: $(TARGET)
 
@@ -69,9 +69,14 @@ CUDACyclone-rckall: $(SRC) $(HDRS) $(RCK_HDR)
 # reproduction of the RCK mul/sqr win; baseline inverse kept). Add CR_NOINLINE=1 to test
 # the __noinline__ fallback if the register check shows spills.
 CR_DEFS := -DUSE_CR_FIELD $(if $(CR_NOINLINE),-DCR_NOINLINE,)
+# crfield  = clean-room operand-scan multiply (prodA, default)
 crfield: CUDACyclone-crfield
 CUDACyclone-crfield: $(SRC) $(HDRS) cr_field.cuh
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(CR_DEFS) $(SRC) -o $@ $(LDFLAGS)
+# crfieldD = clean-room Comba multiply (prodD)
+crfieldD: CUDACyclone-crfieldD
+CUDACyclone-crfieldD: $(SRC) $(HDRS) cr_field.cuh
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(CR_DEFS) -DCR_USE_D $(SRC) -o $@ $(LDFLAGS)
 
 # ---- Phase 0: codegen inspection (no effect on the shipped binary) --------------------
 # Surface what ptxas actually emitted so perf decisions (noinline, register budget,
@@ -96,4 +101,4 @@ sass: $(TARGET)
 clean:
 	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly CUDACyclone-ptxinfo \
 	      CUDACyclone-ecbench CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall \
-	      CUDACyclone-crfield $(OBJ)
+	      CUDACyclone-crfield CUDACyclone-crfieldD $(OBJ)
