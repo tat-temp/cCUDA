@@ -63,8 +63,14 @@ __device__ __constant__ uint32_t IV[8] = {
 };
 __device__ __forceinline__ void SHA256Initialize(uint32_t s[8])
 {
-#pragma unroll
-    for (int i = 0; i < 8; i++) s[i] = IV[i];
+    s[0] = IV[0];
+    s[1] = IV[1];
+    s[2] = IV[2];
+    s[3] = IV[3];
+    s[4] = IV[4];
+    s[5] = IV[5];
+    s[6] = IV[6];
+    s[7] = IV[7];
 }
 // --- Fully hand-unrolled SHA-256 (branch-free) -------------------------------------
 // Replaces the `#pragma unroll 64` loop + `if (t >= 16)` with 64 straight-line rounds.
