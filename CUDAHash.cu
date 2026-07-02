@@ -92,8 +92,22 @@ __device__ __forceinline__ void SHA256Transform(uint32_t state[8], uint32_t W_in
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
 
     uint32_t w[16];
-#pragma unroll
-    for (int i = 0; i < 16; ++i) w[i] = W_in[i];
+    w[ 0] = W_in[ 0];
+    w[ 1] = W_in[ 1];
+    w[ 2] = W_in[ 2];
+    w[ 3] = W_in[ 3];
+    w[ 4] = W_in[ 4];
+    w[ 5] = W_in[ 5];
+    w[ 6] = W_in[ 6];
+    w[ 7] = W_in[ 7];
+    w[ 8] = W_in[ 8];
+    w[ 9] = W_in[ 9];
+    w[10] = W_in[10];
+    w[11] = W_in[11];
+    w[12] = W_in[12];
+    w[13] = W_in[13];
+    w[14] = W_in[14];
+    w[15] = W_in[15];
 
     SHA_RND(a,b,c,d,e,f,g,h, K[ 0], w[ 0]);
     SHA_RND(h,a,b,c,d,e,f,g, K[ 1], w[ 1]);
