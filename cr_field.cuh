@@ -65,6 +65,11 @@ __device__ __forceinline__ void prodA(uint32_t out[16], const uint32_t a[8], con
             : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
               "r"(a[4]), "r"(a[5]), "r"(a[6]), "r"(a[7]), "r"(bj));
     }
+    // out[9..15] are first *accumulated* (+r) by the j>=1 chains, but j==0 only wrote
+    // out[0..8] -- they must be zeroed first. (A local uint32_t[16] is NOT zero-initialized;
+    // omitting this reads garbage high limbs and every product is wrong.)
+    #pragma unroll
+    for (int k = 9; k < 16; ++k) out[k] = 0u;
     // j = 1..7: out[j..j+8] += a[0..7] * b[j]
     #pragma unroll
     for (int j = 1; j < 8; ++j) {
@@ -159,11 +164,12 @@ __device__ CR_INLINE void mulD(uint64_t* rr, const uint64_t* a, const uint64_t* 
     __align__(8) uint32_t t[16]; prodD(t, (const uint32_t*)a, (const uint32_t*)b); reduce512(rr, t);
 }
 
-// backend-selected mul (crfield uses this). Default = A (operand-scan); -DCR_USE_D -> Comba.
-#if defined(CR_USE_D)
-__device__ CR_INLINE void mul(uint64_t* rr, const uint64_t* a, const uint64_t* b){ mulD(rr,a,b); }
-#else
+// backend-selected mul (crfield uses this). Default = D (Comba) -- it measured correct AND
+// fastest (1.124x baseline, 0.903x RCK) in the v3 bake-off; -DCR_USE_A selects the operand-scan.
+#if defined(CR_USE_A)
 __device__ CR_INLINE void mul(uint64_t* rr, const uint64_t* a, const uint64_t* b){ mulA(rr,a,b); }
+#else
+__device__ CR_INLINE void mul(uint64_t* rr, const uint64_t* a, const uint64_t* b){ mulD(rr,a,b); }
 #endif
 __device__ CR_INLINE void mul(uint64_t* rr, const uint64_t* a){ mul(rr, rr, a); }  // rr *= a
 __device__ CR_INLINE void sqr(uint64_t* rr, const uint64_t* a){ mul(rr, a, a); }

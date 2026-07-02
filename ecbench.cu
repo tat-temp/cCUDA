@@ -486,11 +486,11 @@ int main(int argc, char** argv){
 
     double mcA=timed("mul_crA",1,itMul,[&](int it){ t_mul_crA<<<T_bl,T_tpb>>>(tseed,tk,tsink,(int)Nthreads,it); });
     double mcD=timed("mul_crD",1,itMul,[&](int it){ t_mul_crD<<<T_bl,T_tpb>>>(tseed,tk,tsink,(int)Nthreads,it); });
-    double ecA=timed("ec_crA", 1,itEc,[&](int it){ t_ec_cr  <<<T_bl,T_tpb>>>(tseed,tsink,(int)Nthreads,it); });
+    double ecC=timed("ec_cr",  1,itEc,[&](int it){ t_ec_cr  <<<T_bl,T_tpb>>>(tseed,tsink,(int)Nthreads,it); });
     printf("clean-room  mulA %8.1f (cr/cyc %.3fx cr/rck %.3fx)   mulD %8.1f (cr/cyc %.3fx cr/rck %.3fx)\n",
            mcA, mcA/m1, mcA/m2, mcD, mcD/m1, mcD/m2);
-    printf("clean-room  ecstep(A) %8.1f (cr/cyc %.3fx cr/rck %.3fx)   [crfield defaults to mulA; -DCR_USE_D selects mulD]\n",
-           ecA, ecA/e_1, ecA/e_2);
+    printf("clean-room  ecstep(cr=prodD, default) %8.1f (cr/cyc %.3fx cr/rck %.3fx)   [crfield=prodD; -DCR_USE_A selects prodA]\n",
+           ecC, ecC/e_1, ecC/e_2);
 
     printf("\nInterpretation: ecstep reproduces the kernel's per-key blend (~3 mul : 1 sqr; sub NOT\n"
            "swapped, matching rckfield) so ecstep rck/cyc APPROXIMATES the mul/sqr-limited end-to-end\n"
