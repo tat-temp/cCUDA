@@ -1,11 +1,13 @@
-// A/B experiment (branch rck-ec-ab): compile with -DUSE_RCK_FIELD to route _ModMult/
-// _ModSqr through RCKangaroo's field ops, and/or -DUSE_RCK_INV for _ModInv. The kernel
-// call sites are untouched; only these definitions swap. See ec_backend.cuh / EC_AB_README.md.
-#if defined(USE_RCK_FIELD) || defined(USE_RCK_INV)
+// SPDX-License-Identifier: GPL-3.0-or-later  (see LICENSE; default build links GPLv3 RCKangaroo)
+//
+// Field-arithmetic backend. By DEFAULT the secp256k1 field ops (_ModMult / _ModSqr / _ModInv)
+// are RetiredCoder's RCKangaroo implementations (32-bit-limb MulModP/SqrModP + safegcd InvModP,
+// third_party/RCKangaroo/, GPLv3) -- measured ~+8.5% end-to-end on RTX 5090 vs the legacy path.
+// Build with -DUSE_CYCLONE_FIELD to fall back to CUDACyclone's own JeanLucPons-lineage ops. The
+// kernel call sites are untouched; only these definitions switch. See ec_backend.cuh and LICENSE.
+#ifndef USE_CYCLONE_FIELD
 #include "ec_backend.cuh"
 #endif
-// NOTE: cr_field.cuh (clean-room backend) is included further down, AFTER UMultSpecial,
-// because it reuses that reduction macro. See the include just before the _ModMult guard.
 
 #define NBBLOCK 5
 #define BIFULLSIZE 40
@@ -393,7 +395,7 @@ __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry) {
 
 }
 
-#ifndef USE_RCK_INV
+#ifdef USE_CYCLONE_FIELD
 __device__ __noinline__ void _ModInv(uint64_t* R) {
 
     // Compute modular inverse of R mop P (using 320bits signed integer)
@@ -499,9 +501,9 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
     Load(R, r);
 
 }
-#else  // USE_RCK_INV: route _ModInv through RCKangaroo's safegcd InvModP
+#else  // default: RCKangaroo safegcd InvModP (GPLv3, third_party/RCKangaroo)
 __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
-#endif // USE_RCK_INV
+#endif
 
 #define UMultSpecial(r, a) {\
   uint64_t temp; /* Dichiarazione di temp qui */\
@@ -517,14 +519,7 @@ __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
   MADD(r[4], a[3], 0x1000003D1ULL, 0ULL); \
 }
 
-// Clean-room 32-bit multiply: reuses UMultSpecial/UADD* above (license-clean), so it is
-// pulled in here rather than at the top of the file. Only under -DUSE_CR_FIELD.
-#if defined(USE_CR_FIELD)
-#include "cr_field.cuh"
-#endif
-
-
-#if !defined(USE_RCK_FIELD) && !defined(USE_CR_FIELD)
+#ifdef USE_CYCLONE_FIELD
 __device__ void _ModMult(uint64_t *r, uint64_t *a, uint64_t *b) {
 
   uint64_t r512[8];
@@ -732,14 +727,10 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 
 
 }
-#elif defined(USE_RCK_FIELD)  // route _ModMult/_ModSqr through RCKangaroo's MulModP/SqrModP
+#else  // default: RCKangaroo MulModP/SqrModP (GPLv3, third_party/RCKangaroo)
 __device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a, uint64_t* b){ rck::rmul(r,a,b); }
 __device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a){ rck::rmul(r,a); }
 __device__ __forceinline__ void _ModSqr(uint64_t* rp, const uint64_t* up){ rck::rsqr(rp,up); }
-#else  // USE_CR_FIELD: route _ModMult/_ModSqr through the clean-room 32-bit multiply
-__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a, uint64_t* b){ cr::mul(r,a,b); }
-__device__ __forceinline__ void _ModMult(uint64_t* r, uint64_t* a){ cr::mul(r,a); }
-__device__ __forceinline__ void _ModSqr(uint64_t* rp, const uint64_t* up){ cr::sqr(rp,up); }
 #endif // field backend
 
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {

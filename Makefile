@@ -14,7 +14,7 @@ CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
 
-.PHONY: all clean ecgen shaonly ptxinfo sass resusage ecbench rckfield rckinv rckall crfield crfieldA
+.PHONY: all clean ecgen shaonly ptxinfo sass resusage legacy
 
 all: $(TARGET)
 
@@ -36,47 +36,15 @@ shaonly: CUDACyclone-shaonly
 CUDACyclone-shaonly: $(SRC) $(HDRS)
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DSHA_ONLY $(SRC) -o $@ $(LDFLAGS)
 
-%.o: %.cu $(HDRS)
+%.o: %.cu $(HDRS) third_party/RCKangaroo/RCGpuUtils.h
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -c $< -o $@
 
-# ---- RCKangaroo EC-field A/B (branch rck-ec-ab) ---------------------------------------
-# See EC_AB_README.md. Compares RCKangaroo's field ops (third_party/RCKangaroo, GPLv3)
-# against CUDACyclone's own. ec_backend.cuh is the shim; -DUSE_RCK_FIELD / -DUSE_RCK_INV
-# swap them into the production kernel with zero call-site changes.
-RCK_HDR := third_party/RCKangaroo/RCGpuUtils.h ec_backend.cuh
-
-# Standalone per-op correctness (vs Python KATs) + throughput microbench. No hashing.
-ecbench: CUDACyclone-ecbench
-CUDACyclone-ecbench: ecbench.cu $(HDRS) $(RCK_HDR)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) ecbench.cu -o $@ $(LDFLAGS)
-
-# Full search binary, RCKangaroo mul+sqr swapped in (the throughput lever).
-rckfield: CUDACyclone-rckfield
-CUDACyclone-rckfield: $(SRC) $(HDRS) $(RCK_HDR)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_FIELD $(SRC) -o $@ $(LDFLAGS)
-
-# Full search binary, RCKangaroo safegcd inversion swapped in (amortized ~1/batch).
-rckinv: CUDACyclone-rckinv
-CUDACyclone-rckinv: $(SRC) $(HDRS) $(RCK_HDR)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_INV $(SRC) -o $@ $(LDFLAGS)
-
-# Full search binary, RCKangaroo mul+sqr+inv all swapped in.
-rckall: CUDACyclone-rckall
-CUDACyclone-rckall: $(SRC) $(HDRS) $(RCK_HDR)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_RCK_FIELD -DUSE_RCK_INV $(SRC) -o $@ $(LDFLAGS)
-
-# Full search binary, CLEAN-ROOM 32-bit multiply swapped in (cr_field.cuh, license-clean
-# reproduction of the RCK mul/sqr win; baseline inverse kept). Add CR_NOINLINE=1 to test
-# the __noinline__ fallback if the register check shows spills.
-CR_DEFS := -DUSE_CR_FIELD $(if $(CR_NOINLINE),-DCR_NOINLINE,)
-# crfield  = clean-room Comba multiply (prodD, default -- the bake-off winner: correct + fastest)
-crfield: CUDACyclone-crfield
-CUDACyclone-crfield: $(SRC) $(HDRS) cr_field.cuh
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(CR_DEFS) $(SRC) -o $@ $(LDFLAGS)
-# crfieldA = clean-room operand-scan multiply (prodA)
-crfieldA: CUDACyclone-crfieldA
-CUDACyclone-crfieldA: $(SRC) $(HDRS) cr_field.cuh
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(CR_DEFS) -DCR_USE_A $(SRC) -o $@ $(LDFLAGS)
+# Legacy field build: CUDACyclone's own JeanLucPons-lineage _ModMult/_ModSqr/_ModInv instead of
+# the default RCKangaroo ops (compiles NO third_party/RCKangaroo code in). ~8.5% slower on the
+# RTX 5090; kept for reference and A/B against the default. See CUDAMath.h / LICENSE.
+legacy: CUDACyclone-legacy
+CUDACyclone-legacy: $(SRC) $(HDRS)
+	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DUSE_CYCLONE_FIELD $(SRC) -o $@ $(LDFLAGS)
 
 # ---- Phase 0: codegen inspection (no effect on the shipped binary) --------------------
 # Surface what ptxas actually emitted so perf decisions (noinline, register budget,
@@ -99,6 +67,5 @@ sass: $(TARGET)
 	cuobjdump -sass $(TARGET)
 
 clean:
-	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly CUDACyclone-ptxinfo \
-	      CUDACyclone-ecbench CUDACyclone-rckfield CUDACyclone-rckinv CUDACyclone-rckall \
-	      CUDACyclone-crfield CUDACyclone-crfieldA $(OBJ)
+	rm -f $(TARGET) CUDACyclone-legacy CUDACyclone-ecgen CUDACyclone-shaonly \
+	      CUDACyclone-ptxinfo $(OBJ)
