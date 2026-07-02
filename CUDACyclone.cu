@@ -133,7 +133,8 @@ __global__ void kernel_point_add_and_check_oneinv(
             bool pref = false;
 #endif
             if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_full(h5, c_target_words)) {
+                bool full = pref && hash160_matches_full(h5, c_target_words);
+                if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
 #pragma unroll
                         for (int k=0;k<4;++k) d_found_result->scalar[k]=S[k];
@@ -145,7 +146,9 @@ __global__ void kernel_point_add_and_check_oneinv(
                         atomicExch(d_found_flag, FOUND_READY);
                     }
                 }
-                __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
+                // collision must keep scanning, else the skipped write-back drops keys.
+                if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
             }
         }
 
@@ -212,7 +215,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 bool pref = false;
 #endif
                 if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_full(h5, c_target_words)) {
+                    bool full = pref && hash160_matches_full(h5, c_target_words);
+                    if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t addv=(uint64_t)(i+1);
@@ -229,7 +233,9 @@ __global__ void kernel_point_add_and_check_oneinv(
                             atomicExch(d_found_flag, FOUND_READY);
                         }
                     }
-                    __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
+                    // collision must keep scanning, else the skipped write-back drops keys.
+                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
                 }
             }
 
@@ -263,7 +269,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 bool pref = false;
 #endif
                 if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_full(h5, c_target_words)) {
+                    bool full = pref && hash160_matches_full(h5, c_target_words);
+                    if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t sub=(uint64_t)(i+1);
@@ -279,7 +286,9 @@ __global__ void kernel_point_add_and_check_oneinv(
                             atomicExch(d_found_flag, FOUND_READY);
                         }
                     }
-                    __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
+                    // collision must keep scanning, else the skipped write-back drops keys.
+                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
                 }
             }
 
@@ -324,7 +333,8 @@ __global__ void kernel_point_add_and_check_oneinv(
             bool pref = false;
 #endif
             if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_full(h5, c_target_words)) {
+                bool full = pref && hash160_matches_full(h5, c_target_words);
+                if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                         uint64_t sub=(uint64_t)half;
@@ -340,7 +350,9 @@ __global__ void kernel_point_add_and_check_oneinv(
                         atomicExch(d_found_flag, FOUND_READY);
                     }
                 }
-                __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
+                // collision must keep scanning, else the skipped write-back drops keys.
+                if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
             }
 
             uint64_t last_dx[4];
