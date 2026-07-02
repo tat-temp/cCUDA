@@ -63,43 +63,169 @@ __device__ __constant__ uint32_t IV[8] = {
 };
 __device__ __forceinline__ void SHA256Initialize(uint32_t s[8])
 {
-#pragma unroll
-    for (int i = 0; i < 8; i++) s[i] = IV[i];
+    s[0] = IV[0];
+    s[1] = IV[1];
+    s[2] = IV[2];
+    s[3] = IV[3];
+    s[4] = IV[4];
+    s[5] = IV[5];
+    s[6] = IV[6];
+    s[7] = IV[7];
 }
+// --- Fully hand-unrolled SHA-256 (branch-free) -------------------------------------
+// Replaces the `#pragma unroll 64` loop + `if (t >= 16)` with 64 straight-line rounds.
+// Uses name-rotated working registers (the caller shifts a..h by one slot each round,
+// so there are no `h=g; g=f; ...` value moves) over an in-place 16-word rolling
+// schedule. Each round mutates only its `d` (d += T1) and `h` (h = T1 + T2) arguments.
+// The round lines + schedule updates were machine-generated and verified bit-exact vs
+// the prior loop and vs hashlib over 40000 random single-block messages.
+#define SHA_RND(a,b,c,d,e,f,g,h, kt, wt) do { \
+    uint32_t T1 = (h) + bigS1(e) + Ch(e,f,g) + (kt) + (wt); \
+    uint32_t T2 = bigS0(a) + Maj(a,b,c); \
+    (d) += T1; \
+    (h) = T1 + T2; \
+} while (0)
+
 __device__ __forceinline__ void SHA256Transform(uint32_t state[8], uint32_t W_in[64])
 {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
 
     uint32_t w[16];
-#pragma unroll
-    for (int i = 0; i < 16; ++i) w[i] = W_in[i];
+    w[ 0] = W_in[ 0];
+    w[ 1] = W_in[ 1];
+    w[ 2] = W_in[ 2];
+    w[ 3] = W_in[ 3];
+    w[ 4] = W_in[ 4];
+    w[ 5] = W_in[ 5];
+    w[ 6] = W_in[ 6];
+    w[ 7] = W_in[ 7];
+    w[ 8] = W_in[ 8];
+    w[ 9] = W_in[ 9];
+    w[10] = W_in[10];
+    w[11] = W_in[11];
+    w[12] = W_in[12];
+    w[13] = W_in[13];
+    w[14] = W_in[14];
+    w[15] = W_in[15];
 
-#pragma unroll 64
-    for (int t = 0; t < 64; ++t) {
-        if (t >= 16) {
-            uint32_t s0 = smallS0(w[(t + 1)  & 15]);
-            uint32_t s1 = smallS1(w[(t + 14) & 15]);
-            uint32_t newW = w[t & 15] + s1 + w[(t + 9) & 15] + s0;
-            w[t & 15] = newW;
-        }
-        uint32_t Wt = w[t & 15];
-        uint32_t T1 = h + bigS1(e) + Ch(e, f, g) + K[t] + Wt;
-        uint32_t T2 = bigS0(a) + Maj(a, b, c);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d + T1;
-        d = c;
-        c = b;
-        b = a;
-        a = T1 + T2;
-    }
+    SHA_RND(a,b,c,d,e,f,g,h, K[ 0], w[ 0]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[ 1], w[ 1]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[ 2], w[ 2]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[ 3], w[ 3]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[ 4], w[ 4]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[ 5], w[ 5]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[ 6], w[ 6]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[ 7], w[ 7]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[ 8], w[ 8]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[ 9], w[ 9]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[10], w[10]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[11], w[11]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[12], w[12]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[13], w[13]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[14], w[14]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[15], w[15]);
+    w[ 0] += smallS1(w[14]) + w[ 9] + smallS0(w[ 1]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[16], w[ 0]);
+    w[ 1] += smallS1(w[15]) + w[10] + smallS0(w[ 2]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[17], w[ 1]);
+    w[ 2] += smallS1(w[ 0]) + w[11] + smallS0(w[ 3]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[18], w[ 2]);
+    w[ 3] += smallS1(w[ 1]) + w[12] + smallS0(w[ 4]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[19], w[ 3]);
+    w[ 4] += smallS1(w[ 2]) + w[13] + smallS0(w[ 5]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[20], w[ 4]);
+    w[ 5] += smallS1(w[ 3]) + w[14] + smallS0(w[ 6]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[21], w[ 5]);
+    w[ 6] += smallS1(w[ 4]) + w[15] + smallS0(w[ 7]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[22], w[ 6]);
+    w[ 7] += smallS1(w[ 5]) + w[ 0] + smallS0(w[ 8]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[23], w[ 7]);
+    w[ 8] += smallS1(w[ 6]) + w[ 1] + smallS0(w[ 9]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[24], w[ 8]);
+    w[ 9] += smallS1(w[ 7]) + w[ 2] + smallS0(w[10]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[25], w[ 9]);
+    w[10] += smallS1(w[ 8]) + w[ 3] + smallS0(w[11]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[26], w[10]);
+    w[11] += smallS1(w[ 9]) + w[ 4] + smallS0(w[12]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[27], w[11]);
+    w[12] += smallS1(w[10]) + w[ 5] + smallS0(w[13]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[28], w[12]);
+    w[13] += smallS1(w[11]) + w[ 6] + smallS0(w[14]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[29], w[13]);
+    w[14] += smallS1(w[12]) + w[ 7] + smallS0(w[15]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[30], w[14]);
+    w[15] += smallS1(w[13]) + w[ 8] + smallS0(w[ 0]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[31], w[15]);
+    w[ 0] += smallS1(w[14]) + w[ 9] + smallS0(w[ 1]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[32], w[ 0]);
+    w[ 1] += smallS1(w[15]) + w[10] + smallS0(w[ 2]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[33], w[ 1]);
+    w[ 2] += smallS1(w[ 0]) + w[11] + smallS0(w[ 3]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[34], w[ 2]);
+    w[ 3] += smallS1(w[ 1]) + w[12] + smallS0(w[ 4]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[35], w[ 3]);
+    w[ 4] += smallS1(w[ 2]) + w[13] + smallS0(w[ 5]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[36], w[ 4]);
+    w[ 5] += smallS1(w[ 3]) + w[14] + smallS0(w[ 6]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[37], w[ 5]);
+    w[ 6] += smallS1(w[ 4]) + w[15] + smallS0(w[ 7]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[38], w[ 6]);
+    w[ 7] += smallS1(w[ 5]) + w[ 0] + smallS0(w[ 8]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[39], w[ 7]);
+    w[ 8] += smallS1(w[ 6]) + w[ 1] + smallS0(w[ 9]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[40], w[ 8]);
+    w[ 9] += smallS1(w[ 7]) + w[ 2] + smallS0(w[10]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[41], w[ 9]);
+    w[10] += smallS1(w[ 8]) + w[ 3] + smallS0(w[11]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[42], w[10]);
+    w[11] += smallS1(w[ 9]) + w[ 4] + smallS0(w[12]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[43], w[11]);
+    w[12] += smallS1(w[10]) + w[ 5] + smallS0(w[13]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[44], w[12]);
+    w[13] += smallS1(w[11]) + w[ 6] + smallS0(w[14]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[45], w[13]);
+    w[14] += smallS1(w[12]) + w[ 7] + smallS0(w[15]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[46], w[14]);
+    w[15] += smallS1(w[13]) + w[ 8] + smallS0(w[ 0]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[47], w[15]);
+    w[ 0] += smallS1(w[14]) + w[ 9] + smallS0(w[ 1]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[48], w[ 0]);
+    w[ 1] += smallS1(w[15]) + w[10] + smallS0(w[ 2]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[49], w[ 1]);
+    w[ 2] += smallS1(w[ 0]) + w[11] + smallS0(w[ 3]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[50], w[ 2]);
+    w[ 3] += smallS1(w[ 1]) + w[12] + smallS0(w[ 4]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[51], w[ 3]);
+    w[ 4] += smallS1(w[ 2]) + w[13] + smallS0(w[ 5]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[52], w[ 4]);
+    w[ 5] += smallS1(w[ 3]) + w[14] + smallS0(w[ 6]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[53], w[ 5]);
+    w[ 6] += smallS1(w[ 4]) + w[15] + smallS0(w[ 7]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[54], w[ 6]);
+    w[ 7] += smallS1(w[ 5]) + w[ 0] + smallS0(w[ 8]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[55], w[ 7]);
+    w[ 8] += smallS1(w[ 6]) + w[ 1] + smallS0(w[ 9]);
+    SHA_RND(a,b,c,d,e,f,g,h, K[56], w[ 8]);
+    w[ 9] += smallS1(w[ 7]) + w[ 2] + smallS0(w[10]);
+    SHA_RND(h,a,b,c,d,e,f,g, K[57], w[ 9]);
+    w[10] += smallS1(w[ 8]) + w[ 3] + smallS0(w[11]);
+    SHA_RND(g,h,a,b,c,d,e,f, K[58], w[10]);
+    w[11] += smallS1(w[ 9]) + w[ 4] + smallS0(w[12]);
+    SHA_RND(f,g,h,a,b,c,d,e, K[59], w[11]);
+    w[12] += smallS1(w[10]) + w[ 5] + smallS0(w[13]);
+    SHA_RND(e,f,g,h,a,b,c,d, K[60], w[12]);
+    w[13] += smallS1(w[11]) + w[ 6] + smallS0(w[14]);
+    SHA_RND(d,e,f,g,h,a,b,c, K[61], w[13]);
+    w[14] += smallS1(w[12]) + w[ 7] + smallS0(w[15]);
+    SHA_RND(c,d,e,f,g,h,a,b, K[62], w[14]);
+    w[15] += smallS1(w[13]) + w[ 8] + smallS0(w[ 0]);
+    SHA_RND(b,c,d,e,f,g,h,a, K[63], w[15]);
 
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
+#undef SHA_RND
 __device__ __forceinline__ void RIPEMD160Initialize(uint32_t s[5])
 {
 
