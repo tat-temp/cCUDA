@@ -153,6 +153,9 @@ __global__ void kernel_point_add_and_check_oneinv(
         }
 
         uint64_t subp[MAX_BATCH_SIZE/2][4];
+        // dx[i] = Gx[i]-x1 cached during the prefix pass and reused in the inverse-update
+        // walk below, instead of recomputing each (Gx[i]-x1) a second time. (perf A/B: dx-cache)
+        uint64_t dxs[MAX_BATCH_SIZE/2][4];
         uint64_t acc[4], tmp[4];
 
 #pragma unroll
@@ -165,6 +168,8 @@ __global__ void kernel_point_add_and_check_oneinv(
 #pragma unroll
             for (int j=0;j<4;++j) tmp[j] = c_Gx[(size_t)(i+1)*4 + j];
             ModSub256(tmp, tmp, x1);
+#pragma unroll
+            for (int j=0;j<4;++j) dxs[i+1][j] = tmp[j];   // cache dx[i+1]
             _ModMult(acc, acc, tmp);
 #pragma unroll
             for (int j=0;j<4;++j) subp[i][j] = acc[j];
@@ -174,6 +179,8 @@ __global__ void kernel_point_add_and_check_oneinv(
 #pragma unroll
         for (int j=0;j<4;++j) d0[j] = c_Gx[0*4 + j];
         ModSub256(d0, d0, x1);
+#pragma unroll
+        for (int j=0;j<4;++j) dxs[0][j] = d0[j];   // cache dx[0]
 #pragma unroll
         for (int j=0;j<4;++j) inverse[j] = d0[j];
         _ModMult(inverse, subp[0]);
@@ -292,11 +299,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 }
             }
 
-            uint64_t gxmi[4];
-#pragma unroll
-            for (int j=0;j<4;++j) gxmi[j] = c_Gx[(size_t)i*4 + j];
-            ModSub256(gxmi, gxmi, x1);
-            _ModMult(inverse, inverse, gxmi);
+            // dx[i] = Gx[i]-x1 was cached in the prefix pass -> reuse instead of recompute
+            _ModMult(inverse, inverse, dxs[i]);
         }
 
         {
@@ -355,11 +359,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
             }
 
-            uint64_t last_dx[4];
-#pragma unroll
-            for (int j=0;j<4;++j) last_dx[j] = c_Gx[(size_t)i*4 + j];
-            ModSub256(last_dx, last_dx, x1);
-            _ModMult(inverse, inverse, last_dx);
+            // dx[half-1] cached in the prefix pass -> reuse instead of recompute
+            _ModMult(inverse, inverse, dxs[i]);
         }
 
         {
