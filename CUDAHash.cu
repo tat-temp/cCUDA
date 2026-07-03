@@ -487,19 +487,17 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     sha_state_le[14] = 256u;
     sha_state_le[15] = 0u;
 
-    uint32_t s[5];
-    // RIPEMD-160 IV as literals (was RIPEMD160Initialize). s[] is never mutated
-    // between here and the final mix, so the final combine still reads these exact
-    // constants via its rotated mapping — bit-identical digest.
-    s[0] = 0x67452301u;
-    s[1] = 0xEFCDAB89u;
-    s[2] = 0x98BADCFEu;
-    s[3] = 0x10325476u;
-    s[4] = 0xC3D2E1F0u;
-    RIPEMD160Transform(s, sha_state_le);
-    // out5[i] is hash160 word i, little-endian (see CUDAUtils.h).
-#pragma unroll
-    for (int i = 0; i < 5; ++i) out5[i] = s[i];
+    // RIPEMD-160 IV as literals, written straight into out5 — which doubles as the
+    // RIPEMD state. RIPEMD160Transform reads these at entry, leaves them untouched
+    // through the 80 rounds, then overwrites them with the final digest, so the old
+    // s[5] scratch + 5-word copy-back were redundant. (out5 and sha_state_le are
+    // distinct buffers, so no aliasing.) out5[i] is hash160 word i, little-endian.
+    out5[0] = 0x67452301u;
+    out5[1] = 0xEFCDAB89u;
+    out5[2] = 0x98BADCFEu;
+    out5[3] = 0x10325476u;
+    out5[4] = 0xC3D2E1F0u;
+    RIPEMD160Transform(out5, sha_state_le);
 }
 
 __device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
