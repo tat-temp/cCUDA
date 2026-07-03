@@ -86,28 +86,32 @@ __device__ __forceinline__ void SHA256Initialize(uint32_t s[8])
     (h) = T1 + T2; \
 } while (0)
 
-__device__ __forceinline__ void SHA256Transform(uint32_t state[8], uint32_t W_in[64])
+// Specialized for the fixed 33-byte compressed-pubkey message: only the 9 data words
+// M[0..8] vary per key; the padding tail is compile-time constant (w[9..14]=0) and the
+// length field is fixed (w[15] = 33*8 = 264). The caller no longer materializes those
+// 7 words, and the schedule words w[16..63] are computed in-place below (never passed in).
+__device__ __forceinline__ void SHA256Transform(uint32_t state[8], const uint32_t M[9])
 {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
 
     uint32_t w[16];
-    w[ 0] = W_in[ 0];
-    w[ 1] = W_in[ 1];
-    w[ 2] = W_in[ 2];
-    w[ 3] = W_in[ 3];
-    w[ 4] = W_in[ 4];
-    w[ 5] = W_in[ 5];
-    w[ 6] = W_in[ 6];
-    w[ 7] = W_in[ 7];
-    w[ 8] = W_in[ 8];
-    w[ 9] = W_in[ 9];
-    w[10] = W_in[10];
-    w[11] = W_in[11];
-    w[12] = W_in[12];
-    w[13] = W_in[13];
-    w[14] = W_in[14];
-    w[15] = W_in[15];
+    w[ 0] = M[ 0];
+    w[ 1] = M[ 1];
+    w[ 2] = M[ 2];
+    w[ 3] = M[ 3];
+    w[ 4] = M[ 4];
+    w[ 5] = M[ 5];
+    w[ 6] = M[ 6];
+    w[ 7] = M[ 7];
+    w[ 8] = M[ 8];
+    w[ 9] = 0u;
+    w[10] = 0u;
+    w[11] = 0u;
+    w[12] = 0u;
+    w[13] = 0u;
+    w[14] = 0u;
+    w[15] = 33u * 8u;   // 264: message-length field for the fixed 33-byte input
 
     SHA_RND(a,b,c,d,e,f,g,h, K[ 0], w[ 0]);
     SHA_RND(h,a,b,c,d,e,f,g, K[ 1], w[ 1]);
@@ -451,7 +455,9 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
     const uint64_t v2 = x_be_limbs[2];
     const uint64_t v1 = x_be_limbs[1];
     const uint64_t v0 = x_be_limbs[0];
-    uint32_t M[16];
+    // Only the 9 data words are built here; SHA256Transform bakes in the constant
+    // padding tail (w[9..14]=0) and length word (w[15]=264) itself.
+    uint32_t M[9];
     M[0] = pack_be4(prefix02_03, (uint8_t)(v3>>56), (uint8_t)(v3>>48), (uint8_t)(v3>>40));
     M[1] = pack_be4((uint8_t)(v3>>32), (uint8_t)(v3>>24), (uint8_t)(v3>>16), (uint8_t)(v3>>8));
     M[2] = pack_be4((uint8_t)(v3>>0), (uint8_t)(v2>>56), (uint8_t)(v2>>48), (uint8_t)(v2>>40));
@@ -461,9 +467,6 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
     M[6] = pack_be4((uint8_t)(v1>>0), (uint8_t)(v0>>56), (uint8_t)(v0>>48), (uint8_t)(v0>>40));
     M[7] = pack_be4((uint8_t)(v0>>32), (uint8_t)(v0>>24), (uint8_t)(v0>>16), (uint8_t)(v0>>8));
     M[8] = pack_be4((uint8_t)(v0>>0), 0x80u, 0x00u, 0x00u);
-#pragma unroll
-    for(int i=9;i<16;++i) M[i]=0;
-    M[15] = 33u*8u;
     uint32_t st[8];
     SHA256Initialize(st);
     SHA256Transform(st, M);
