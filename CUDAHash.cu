@@ -57,21 +57,10 @@ __device__ __constant__ uint32_t K[64] = {
     0x748F82EE,0x78A5636F,0x84C87814,0x8CC70208,0x90BEFFFA,0xA4506CEB,0xBEF9A3F7,0xC67178F2
 };
 
-__device__ __constant__ uint32_t IV[8] = {
-    0x6a09e667ul,0xbb67ae85ul,0x3c6ef372ul,0xa54ff53aul,
-    0x510e527ful,0x9b05688cul,0x1f83d9ab ,0x5be0cd19ul
-};
-__device__ __forceinline__ void SHA256Initialize(uint32_t s[8])
-{
-    s[0] = IV[0];
-    s[1] = IV[1];
-    s[2] = IV[2];
-    s[3] = IV[3];
-    s[4] = IV[4];
-    s[5] = IV[5];
-    s[6] = IV[6];
-    s[7] = IV[7];
-}
+// SHA-256 IV is written as literals straight into the state at the single seed
+// site (SHA256_33_from_limbs) so ptxas sees compile-time inputs to round 0 and can
+// constant-fold it, instead of reloading the IV from __constant__ memory (LDC).
+// The former __constant__ IV[8] + SHA256Initialize() are gone; values are unchanged.
 // --- Fully hand-unrolled SHA-256 (branch-free) -------------------------------------
 // Replaces the `#pragma unroll 64` loop + `if (t >= 16)` with 64 straight-line rounds.
 // Uses name-rotated working registers (the caller shifts a..h by one slot each round,
@@ -230,16 +219,9 @@ __device__ __forceinline__ void SHA256Transform(uint32_t state[8], const uint32_
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 #undef SHA_RND
-__device__ __forceinline__ void RIPEMD160Initialize(uint32_t s[5])
-{
-
-	s[0] = 0x67452301ul;
-	s[1] = 0xEFCDAB89ul;
-	s[2] = 0x98BADCFEul;
-	s[3] = 0x10325476ul;
-	s[4] = 0xC3D2E1F0ul;
-
-}
+// RIPEMD-160 IV is written as literals at its single seed site
+// (RIPEMD160_from_SHA256_state). These values were already literals, so this is a
+// pure code-tidy — no codegen change — kept for symmetry with the SHA-256 seed.
 
 #define ROL(x,n) ((x>>(32-n))|(x<<n))
 #define f1(x, y, z) (x ^ y ^ z)
@@ -468,7 +450,17 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
     M[7] = pack_be4((uint8_t)(v0>>32), (uint8_t)(v0>>24), (uint8_t)(v0>>16), (uint8_t)(v0>>8));
     M[8] = pack_be4((uint8_t)(v0>>0), 0x80u, 0x00u, 0x00u);
     uint32_t st[8];
-    SHA256Initialize(st);
+    // SHA-256 IV as literals (was SHA256Initialize copying from __constant__ IV[8]).
+    // Seeding st[] with immediates lets ptxas constant-fold round 0; SHA256Transform
+    // and its final `state[i] += var` are untouched, so st[i] is bit-identical.
+    st[0] = 0x6a09e667u;
+    st[1] = 0xbb67ae85u;
+    st[2] = 0x3c6ef372u;
+    st[3] = 0xa54ff53au;
+    st[4] = 0x510e527fu;
+    st[5] = 0x9b05688cu;
+    st[6] = 0x1f83d9abu;
+    st[7] = 0x5be0cd19u;
     SHA256Transform(st, M);
 #pragma unroll
     for(int i=0;i<8;++i) out_state[i]= bswap32(st[i]);
@@ -484,7 +476,14 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     sha_state_le[15] = 0u;
 
     uint32_t s[5];
-    RIPEMD160Initialize(s);
+    // RIPEMD-160 IV as literals (was RIPEMD160Initialize). s[] is never mutated
+    // between here and the final mix, so the final combine still reads these exact
+    // constants via its rotated mapping — bit-identical digest.
+    s[0] = 0x67452301u;
+    s[1] = 0xEFCDAB89u;
+    s[2] = 0x98BADCFEu;
+    s[3] = 0x10325476u;
+    s[4] = 0xC3D2E1F0u;
     RIPEMD160Transform(s, sha_state_le);
     // out5[i] is hash160 word i, little-endian (see CUDAUtils.h).
 #pragma unroll
