@@ -46,7 +46,19 @@ __device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){
 #endif
 }
 
-__device__ __constant__ uint32_t K[64] = {
+// K-literalization (combined with the IV seed literalization on this branch) —
+// was `__device__ __constant__`. Goal: let ptxas fold each K[t] (all indices are
+// compile-time in the unrolled rounds) into an IADD3 immediate operand and drop the
+// per-round LDC (64 of them), and complete the round-0 collapse begun by the IV
+// seed. Values UNCHANGED => bit-exact; only the storage class changes. This is the
+// two-sided half of the branch: 64 baked immediates may raise immediate/constant-bank
+// pressure and could REGRESS, so it lands as its own commit and can be reverted to
+// isolate the IV-only effect if the A/B is ambiguous.
+// A/B PROTOCOL NOTE: verify via `make sass` that per-round K LDC loads actually
+// disappeared; if ptxas still materializes K from memory here, switch this to
+// `constexpr uint32_t K[64]` (pure compile-time, no device storage) before timing,
+// else the measurement is a false null.
+__device__ static const uint32_t K[64] = {
     0x428A2F98,0x71374491,0xB5C0FBCF,0xE9B5DBA5,0x3956C25B,0x59F111F1,0x923F82A4,0xAB1C5ED5,
     0xD807AA98,0x12835B01,0x243185BE,0x550C7DC3,0x72BE5D74,0x80DEB1FE,0x9BDC06A7,0xC19BF174,
     0xE49B69C1,0xEFBE4786,0x0FC19DC6,0x240CA1CC,0x2DE92C6F,0x4A7484AA,0x5CB0A9DC,0x76F988DA,
