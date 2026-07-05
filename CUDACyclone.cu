@@ -48,6 +48,16 @@ __device__ __forceinline__ bool warp_found_ready(const int* __restrict__ d_found
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
+// Found-flag poll cadence for the hot inner point-add loop. The flag is a terminal,
+// one-shot event (published once via atomicCAS by the finding warp), so polling it on
+// EVERY inner iteration only sheds a volatile L2 load + __shfl_sync per point for no
+// responsiveness we need -- the unconditional per-batch poll (kernel top of the batch
+// loop) already bounds the abort latency. Poll every (MASK+1)-th inner iteration instead.
+// i is warp-uniform (a plain loop counter), so the whole warp polls or skips together and
+// __shfl_sync stays converged. Must be 2^k-1. Override with -DFOUND_POLL_MASK=... to A/B.
+#ifndef FOUND_POLL_MASK
+#define FOUND_POLL_MASK 31u
+#endif
 
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
@@ -181,7 +191,8 @@ __global__ void kernel_point_add_and_check_oneinv(
         _ModInv(inverse);
 
         for (int i = 0; i < half - 1; ++i) {
-            if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
+            if (((unsigned)i & FOUND_POLL_MASK) == 0u &&
+                warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
 
             uint64_t dx_inv_i[4];
             _ModMult(dx_inv_i, subp[i], inverse);
