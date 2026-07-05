@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Clock-normalized keys/cycle A/B for CUDACyclone -- v3 (second-slot-hardened).
+# Clock-normalized keys/cycle A/B for CUDACyclone -- v3.1 (second-slot-hardened; +raw Mk/s & power).
+# v3.1: also reports RAW Mkeys/s + board power over ALL reps. When a code change moves the clock
+# ENDOGENOUSLY (draws more/less power on a power-capped card), keys/cyc divides that real effect
+# out -- raw Mk/s is then the honest production metric (see the occ4 / dx-cache findings).
 # Compares two branches' steady-state keys/cycle on the SAME box, dividing DVFS out.
 # Fixes the classic artifact (a DVFS ramp with unpaired arm clocks fakes a delta):
 #   * throttle/co-tenant PREFLIGHT (refuse a degraded box)
@@ -31,7 +34,8 @@ WARMUP="${WARMUP:-6}"       # per-run seconds discarded before sampling
 WINDOW="${WINDOW:-25}"      # per-run steady sampling seconds
 REPS="${REPS:-10}"          # quick screen (10 reps); raise (v3 shipped 40) to resolve sub-0.5% effects
 STAB_TOL="${STAB_TOL:-0.01}"   # max in-window clock sd/mean to accept a rep (1%)
-CLK_MATCH="${CLK_MATCH:-25}"   # max |arm_A_clk - arm_B_clk| MHz to accept a rep pair
+CLK_MATCH="${CLK_MATCH:-100}"  # v3.1: relaxed 25->100. An ENDOGENOUS (code-driven) clock gap must NOT
+                               # gate reps -- raw Mk/s is judged over ALL reps; 25 only guards keys/cyc noise
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-0}"  # 1 = abort if preflight shows throttle/co-tenant
 
 [ "${#BRANCHES[@]}" -eq 2 ] || { echo "need exactly 2 branches, got: ${BRANCHES[*]}"; exit 1; }
@@ -70,28 +74,34 @@ timeout -s INT "$SOAK" "$TMP/CUDACyclone.${BRANCHES[0]}" \
     --range "$RANGE" --target-hash160 "$TARGET" --grid "$GRID" >/dev/null 2>&1 || true
 echo "  post-soak clock: $(nvidia-smi --query-gpu=clocks.sm --format=csv,noheader,nounits | head -n1) MHz"
 
-run_once() {  # $1 = binary ; echoes "kc_paired clk_mean clk_sd nsamp"
-  local bin="$1" out="$TMP/out" t=0 pid clk spd
-  : > "$out"; : > "$TMP/ratios"; : > "$TMP/clks"
+run_once() {  # $1 = binary ; echoes "kc clk_mean clk_sd nsamp raw_mean pwr_mean"
+  local bin="$1" out="$TMP/out" t=0 pid clk spd pwr
+  : > "$out"; : > "$TMP/ratios"; : > "$TMP/clks"; : > "$TMP/speeds"; : > "$TMP/pwrs"
   timeout -s INT $((WARMUP+WINDOW+1)) "$bin" \
       --range "$RANGE" --target-hash160 "$TARGET" --grid "$GRID" > "$out" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null && [ "$t" -lt $((WARMUP+WINDOW)) ]; do
     if [ "$t" -ge "$WARMUP" ]; then
-      clk=$(nvidia-smi --query-gpu=clocks.sm --format=csv,noheader,nounits 2>/dev/null | head -n1)
+      # clock + board power in ONE query so both are read at the same instant
+      IFS=',' read -r clk pwr < <(nvidia-smi --query-gpu=clocks.sm,power.draw --format=csv,noheader,nounits 2>/dev/null | head -n1)
+      clk="${clk// /}"; pwr="${pwr// /}"
       spd=$(tr '\r' '\n' < "$out" | sed -nE 's/.*Speed:[[:space:]]*([0-9.]+).*/\1/p' | tail -n1)
       if [ -n "$clk" ] && [ -n "$spd" ]; then
         awk -v s="$spd" -v c="$clk" 'BEGIN{if(c>0)printf "%.6f\n", s/c}' >> "$TMP/ratios"
         echo "$clk" >> "$TMP/clks"
+        echo "$spd" >> "$TMP/speeds"
+        [[ "$pwr" =~ ^[0-9.]+$ ]] && echo "$pwr" >> "$TMP/pwrs"
       fi
     fi
     sleep 1; t=$((t+1))
   done
   kill -INT "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-  local kc cline
+  local kc cline sp pw
   kc=$(awk 'NF{s+=$1;n++} END{if(n>0)printf "%.6f",s/n; else printf "NaN"}' "$TMP/ratios")
   cline=$(awk 'NF{s+=$1;ss+=$1*$1;n++} END{if(n>0){m=s/n; sd=(n>1)?sqrt((ss-n*m*m)/(n-1)):0; printf "%.2f %.2f %d",m,sd,n} else printf "NaN NaN 0"}' "$TMP/clks")
-  echo "$kc $cline"
+  sp=$(awk 'NF{s+=$1;n++} END{if(n>0)printf "%.3f",s/n; else printf "NaN"}' "$TMP/speeds")
+  pw=$(awk 'NF{s+=$1;n++} END{if(n>0)printf "%.1f",s/n; else printf "NaN"}' "$TMP/pwrs")
+  echo "$kc $cline $sp $pw"
 }
 
 : > "$TMP/all.dat"
@@ -107,32 +117,34 @@ for ((r=1; r<=REPS; r++)); do
       timeout -s INT "$PREWARM" "$TMP/CUDACyclone.$b" \
           --range "$RANGE" --target-hash160 "$TARGET" --grid "$GRID" >/dev/null 2>&1 || true
     fi
-    read -r kc cm csd ns < <(run_once "$TMP/CUDACyclone.$b")
-    printf 'rep %2d  %-10s pos=%d keys/cyc=%s  clk=%s MHz (sd %s, n=%s)\n' "$r" "$b" "$pos" "$kc" "$cm" "$csd" "$ns"
-    echo "$r $b $kc $cm $csd $pos" >> "$TMP/all.dat"
+    read -r kc cm csd ns sp pw < <(run_once "$TMP/CUDACyclone.$b")
+    printf 'rep %2d  %-10s pos=%d keys/cyc=%s  clk=%s MHz (sd %s, n=%s)  raw=%s Mk/s  pwr=%s W\n' "$r" "$b" "$pos" "$kc" "$cm" "$csd" "$ns" "$sp" "$pw"
+    echo "$r $b $kc $cm $csd $pos $sp $pw" >> "$TMP/all.dat"
   done
 done
 
-echo; echo "== verdict (clean = both arms clock-stable AND arm-to-arm matched) =="
+echo; echo "== verdict =="
 python3 - "$TMP/all.dat" "${BRANCHES[0]}" "${BRANCHES[1]}" "$STAB_TOL" "$CLK_MATCH" <<'PY'
 import sys, math, statistics as st
 path, A, B, stab, match = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
 reps={}
 for ln in open(path):
     p=ln.split()
-    if len(p)<5: continue
+    if len(p)<6: continue
     r=int(p[0]); br=p[1]
-    try: kc=float(p[2]); cm=float(p[3]); csd=float(p[4])
+    try: kc=float(p[2]); cm=float(p[3]); csd=float(p[4]); pos=int(p[5])
     except: continue
-    pos=int(p[5]) if len(p)>=6 else 0
-    reps.setdefault(r,{})[br]=(kc,cm,csd,pos)
-cleanA=[]; cleanB=[]; allA=[]; allB=[]; dropped=[]
-cleanDiff=[]; diff_Afirst=[]; diff_Bfirst=[]
+    sp=float(p[6]) if len(p)>=7 else float('nan')
+    pw=float(p[7]) if len(p)>=8 else float('nan')
+    reps.setdefault(r,{})[br]=(kc,cm,csd,pos,sp,pw)
+allA=[];allB=[]; rawA=[];rawB=[]; clkA=[];clkB=[]; pwrA=[];pwrB=[]
+cleanA=[];cleanB=[]; cleanDiff=[]; diff_Afirst=[]; diff_Bfirst=[]; dropped=[]
 for r in sorted(reps):
     d=reps[r]
     if A not in d or B not in d: continue
-    (kcA,cmA,csdA,posA)=d[A]; (kcB,cmB,csdB,posB)=d[B]
-    allA.append(kcA); allB.append(kcB)
+    (kcA,cmA,csdA,posA,spA,pwA)=d[A]; (kcB,cmB,csdB,posB,spB,pwB)=d[B]
+    allA.append(kcA); allB.append(kcB); rawA.append(spA); rawB.append(spB); clkA.append(cmA); clkB.append(cmB)
+    if not math.isnan(pwA) and not math.isnan(pwB): pwrA.append(pwA); pwrB.append(pwB)
     stableA = cmA>0 and csdA/cmA<=stab
     stableB = cmB>0 and csdB/cmB<=stab
     matched = abs(cmA-cmB)<=match
@@ -147,6 +159,30 @@ for r in sorted(reps):
         if not stableB: why.append(f"{B} unstable(sd/mean={csdB/cmB:.3f})")
         if not matched: why.append(f"clk gap {abs(cmA-cmB):.0f}MHz")
         dropped.append(f"  rep {r}: "+", ".join(why)+f"  (clk {A}={cmA:.0f} {B}={cmB:.0f})")
+def cmp(a,b,tag,unit="",prec=3):
+    a=[x for x in a if not math.isnan(x)]; b=[x for x in b if not math.isnan(x)]
+    if len(a)<2 or len(b)<2:
+        print(f"[{tag}] too few reps ({len(a)}/{len(b)})"); return None,False
+    ma,mb=st.mean(a),st.mean(b); sa,sb=st.stdev(a),st.stdev(b)
+    se=math.sqrt(sa*sa/len(a)+sb*sb/len(b)); t=(mb-ma)/se if se>0 else float('nan')
+    sep = min(b)>max(a) or min(a)>max(b)
+    print(f"[{tag}] {A}={ma:.{prec}f}{unit} (sd {sa:.{prec}f}, n={len(a)}) | {B}={mb:.{prec}f}{unit} (sd {sb:.{prec}f}, n={len(b)})")
+    print(f"[{tag}] delta({B} vs {A})={(mb-ma)/ma*100:+.3f}%  Welch t={t:+.2f}  total-separation={'YES' if sep else 'no'}")
+    return (mb-ma), sep
+print("== PRODUCTION metrics, ALL reps (gate-independent; the HONEST read when the clock is endogenous) ==")
+draw,rsep = cmp(rawA, rawB, "RAW Mkeys/s", " Mk/s", 3)
+dclk,csep = cmp(clkA, clkB, "clock",       " MHz", 1)
+dpw,_     = cmp(pwrA, pwrB, "power",       " W",   1) if pwrA else (None,False)
+if draw is not None and dclk is not None and rsep and csep and (draw>0)==(dclk>0):
+    hi = B if draw>0 else A
+    pnote = ""
+    if dpw is not None: pnote = f", at {'LOWER' if (dpw<0)==(draw>0) else 'HIGHER'} power"
+    print(f">>> ENDOGENOUS clock: {hi} sustains a higher sustained clock{pnote} -> RAW Mk/s is the honest metric.")
+    print(f">>> {hi} wins on RAW throughput with TOTAL SEPARATION. Real ONLY IF proof.py is green AND it reproduces.")
+elif dclk is not None and not csep:
+    print(">>> clock not separated -> not clearly endogenous; the keys/cyc read below is primary.")
+print()
+print("== keys/cycle, clock-normalized (divides an endogenous clock OUT -> SECONDARY here) ==")
 def stat(a,b,tag):
     if len(a)<2 or len(b)<2:
         print(f"[{tag}] too few reps ({len(a)}/{len(b)}) for a stat"); return
@@ -157,7 +193,7 @@ def stat(a,b,tag):
     print(f"[{tag}] delta({B} vs {A})={ (mb-ma)/ma*100:+.3f}%  Welch t={t:+.2f}  total-separation={'YES' if sep else 'no'}")
     return (mb-ma)
 if dropped:
-    print("gated-out reps:"); print("\n".join(dropped))
+    print("gated-out reps (keys/cyc clean subset only):"); print("\n".join(dropped))
 print()
 dfull=stat(allA,allB,"ALL reps")
 dclean=stat(cleanA,cleanB,"CLEAN subset")
@@ -184,9 +220,9 @@ if mAf is not None and mBf is not None:
         print(">>> position bonus COMPARABLE to effect -> still order-fragile; win not proven to be the code.")
 print()
 if isinstance(dfull,float) and isinstance(dclean,float) and (dfull>0)!=(dclean>0):
-    print(">>> FULL vs CLEAN disagree in SIGN -> INCONCLUSIVE, re-run at a stable clock.")
+    print(">>> keys/cyc FULL vs CLEAN disagree in SIGN -> keys/cyc inconclusive (EXPECTED if the clock is endogenous; use RAW Mk/s above).")
 elif len(cleanA)<12:
-    print(f">>> only {len(cleanA)} clean reps/arm (<12) -> underpowered for a sub-0.5% call; add reps or fix the clock.")
+    print(f">>> only {len(cleanA)} keys/cyc clean reps/arm (<12); for an endogenous clock the RAW Mk/s call above is what matters.")
 else:
-    print(">>> clean subset is the headline; call a WIN only at Welch t~5 WITH total-separation AND the B-first split also positive.")
+    print(">>> keys/cyc secondary; the production call is RAW Mk/s above (a WIN needs separation there + proof.py green + a reproduce run).")
 PY
