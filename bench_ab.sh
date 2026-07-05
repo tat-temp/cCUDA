@@ -16,7 +16,7 @@
 #   * run_order (pos 1|2) logged per sample; verdict now reports the ORDER SPLIT and the
 #     decisive perf-first-only stat (a real code win must survive when the treated arm runs 1st)
 # Usage (from repo root on the GPU box):
-#     bash bench_ab.sh                              # default: main vs perf-insn, REPS=40, PREWARM=12
+#     bash bench_ab.sh                              # default: main vs perf-insn, REPS=10, PREWARM=12
 #     BRANCHES="main perf-insn" bash bench_ab.sh
 #     PREWARM=0 REPS=14 bash bench_ab.sh            # reproduce the old v2 behavior
 set -uo pipefail
@@ -29,7 +29,7 @@ SOAK="${SOAK:-75}"          # untimed heat-soak seconds (settle DVFS to a flat c
 PREWARM="${PREWARM:-12}"    # v3: per-arm untimed warmup before EACH timed sample (0 = v2 behavior)
 WARMUP="${WARMUP:-6}"       # per-run seconds discarded before sampling
 WINDOW="${WINDOW:-25}"      # per-run steady sampling seconds
-REPS="${REPS:-40}"          # v3: powered for a ~+0.12% true effect vs the strict t~5 bar
+REPS="${REPS:-10}"          # quick screen (10 reps); raise (v3 shipped 40) to resolve sub-0.5% effects
 STAB_TOL="${STAB_TOL:-0.01}"   # max in-window clock sd/mean to accept a rep (1%)
 CLK_MATCH="${CLK_MATCH:-25}"   # max |arm_A_clk - arm_B_clk| MHz to accept a rep pair
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-0}"  # 1 = abort if preflight shows throttle/co-tenant
