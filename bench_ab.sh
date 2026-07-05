@@ -19,7 +19,7 @@
 #   * run_order (pos 1|2) logged per sample; verdict now reports the ORDER SPLIT and the
 #     decisive perf-first-only stat (a real code win must survive when the treated arm runs 1st)
 # Usage (from repo root on the GPU box):
-#     bash bench_ab.sh                              # default: main vs perf-insn, REPS=10, PREWARM=12
+#     bash bench_ab.sh                              # default: main vs perf-insn, REPS=5, PREWARM=12
 #     BRANCHES="main perf-insn" bash bench_ab.sh
 #     PREWARM=0 REPS=14 bash bench_ab.sh            # reproduce the old v2 behavior
 set -uo pipefail
@@ -32,7 +32,7 @@ SOAK="${SOAK:-75}"          # untimed heat-soak seconds (settle DVFS to a flat c
 PREWARM="${PREWARM:-12}"    # v3: per-arm untimed warmup before EACH timed sample (0 = v2 behavior)
 WARMUP="${WARMUP:-6}"       # per-run seconds discarded before sampling
 WINDOW="${WINDOW:-25}"      # per-run steady sampling seconds
-REPS="${REPS:-10}"          # quick screen (10 reps); raise (v3 shipped 40) to resolve sub-0.5% effects
+REPS="${REPS:-5}"           # fast screen (5 reps); fine for a total-separation raw-Mk/s effect, too few for a sub-0.5% keys/cyc call
 STAB_TOL="${STAB_TOL:-0.01}"   # max in-window clock sd/mean to accept a rep (1%)
 CLK_MATCH="${CLK_MATCH:-100}"  # v3.1: relaxed 25->100. An ENDOGENOUS (code-driven) clock gap must NOT
                                # gate reps -- raw Mk/s is judged over ALL reps; 25 only guards keys/cyc noise
