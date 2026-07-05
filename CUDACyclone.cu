@@ -206,9 +206,13 @@ __global__ void kernel_point_add_and_check_oneinv(
                 ModSub256(s, py_i, y1);
                 _ModMult(lam, s, dx_inv_i);
 
-                _ModSqr(px3, lam);     
+                _ModSqr(px3, lam);
+#if TERNARY_SUB
+                ModSub256_2(px3, px3, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
+#else
                 ModSub256(px3, px3, x1);
                 ModSub256(px3, px3, px_i);
+#endif
 
                 ModSub256(s, x1, px3); 
                 _ModMult(s, s, lam);
@@ -261,8 +265,12 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(lam, s, dx_inv_i);
 
                 _ModSqr(px3, lam);
+#if TERNARY_SUB
+                ModSub256_2(px3, px3, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
+#else
                 ModSub256(px3, px3, x1);
                 ModSub256(px3, px3, px_i);
+#endif
 
                 ModSub256(s, x1, px3);
                 _ModMult(s, s, lam);
@@ -325,8 +333,12 @@ __global__ void kernel_point_add_and_check_oneinv(
             _ModMult(lam, s, dx_inv_i);
 
             _ModSqr(px3, lam);
+#if TERNARY_SUB
+            ModSub256_2(px3, px3, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
+#else
             ModSub256(px3, px3, x1);
             ModSub256(px3, px3, px_i);
+#endif
 
             ModSub256(s, x1, px3);
             _ModMult(s, s, lam);
@@ -383,9 +395,14 @@ __global__ void kernel_point_add_and_check_oneinv(
 
             _ModMult(lam, Jy_minus_y1, inverse);
             _ModSqr(x3, lam);
+#if TERNARY_SUB
+            uint64_t Jx_local[4]; for (int j=0;j<4;++j) Jx_local[j]=c_Jx[j];
+            ModSub256_2(x3, x3, x1, Jx_local);   // x3 = lam^2 - x1 - Jx (fused, one reduction)
+#else
             ModSub256(x3, x3, x1);
             uint64_t Jx_local[4]; for (int j=0;j<4;++j) Jx_local[j]=c_Jx[j];
             ModSub256(x3, x3, Jx_local);
+#endif
 
             ModSub256(s, x1, x3);
             _ModMult(y3, s, lam);

@@ -12,6 +12,13 @@
 #define NBBLOCK 5
 #define BIFULLSIZE 40
 
+// f1 experiment: fuse the two consecutive `x3 = lam^2 - x1 - <pt>` modular subtractions in the
+// point-add hot path into one ModSub256_2 call (single reduction). Default ON for this branch;
+// build with -DTERNARY_SUB=0 to get the byte-identical two-call baseline for a same-checkout A/B.
+#ifndef TERNARY_SUB
+#define TERNARY_SUB 1
+#endif
+
 
 #define UADDO(c, a, b) asm volatile ("add.cc.u64 %0, %1, %2;" : "=l"(c) : "l"(a), "l"(b) : "memory" );
 #define UADDC(c, a, b) asm volatile ("addc.cc.u64 %0, %1, %2;" : "=l"(c) : "l"(a), "l"(b) : "memory" );
@@ -246,13 +253,54 @@ __device__ void ModSub256(uint64_t* r,uint64_t* b) {
     USUBC1(r[1], b[1]);
     USUBC1(r[2], b[2]);
     USUBC1(r[3], b[3]);
-    USUB(borrow, 0ULL, 0ULL); 
+    USUB(borrow, 0ULL, 0ULL);
 
     if (borrow) {
         UADDO1(r[0], p[0]);
         UADDC1(r[1], p[1]);
         UADDC1(r[2], p[2]);
         UADD1(r[3], p[3]);
+    }
+}
+
+// Fused (a - b - c) mod p for the secp256k1 prime, inputs a,b,c in [0,p).
+// Two subtract chains, then a SINGLE reduction. Since p = 2^256 - K (K = 0x1000003D1) the raw
+// a-b-c lands in (-2p, p) with a total borrow count B in {0,1,2}, and a-b-c == r - B*2^256
+// == r - B*K (mod p), where r is the 256-bit wrapped result. Subtracting B*K then one conditional
+// +p brings it back to [0,p). NOTE: "add p once per borrow" is INCORRECT at the boundary (e.g.
+// a=0,b=p-1,c=2), which is why the B*K form + fix-up is required -- verified vs Python reference.
+// r may alias a (each a[i] is read before r[i] is written); c and b must not alias r.
+__device__ void ModSub256_2(uint64_t* r, const uint64_t* a, const uint64_t* b, const uint64_t* c) {
+
+    uint64_t brw1, brw2, brw3;
+
+    // r = a - b
+    USUBO(r[0], a[0], b[0]);
+    USUBC(r[1], a[1], b[1]);
+    USUBC(r[2], a[2], b[2]);
+    USUBC(r[3], a[3], b[3]);
+    USUB(brw1, 0ULL, 0ULL);            // 0 or 0xFFFFFFFFFFFFFFFF
+
+    // r = r - c
+    USUBO1(r[0], c[0]);
+    USUBC1(r[1], c[1]);
+    USUBC1(r[2], c[2]);
+    USUBC1(r[3], c[3]);
+    USUB(brw2, 0ULL, 0ULL);
+
+    // a-b-c == r - B*K (mod p), B = (#borrows) in {0,1,2}
+    uint64_t BK = ((brw1 & 1ULL) + (brw2 & 1ULL)) * 0x1000003D1ULL;
+    USUBO1(r[0], BK);
+    USUBC1(r[1], 0ULL);
+    USUBC1(r[2], 0ULL);
+    USUBC1(r[3], 0ULL);
+    USUB(brw3, 0ULL, 0ULL);
+
+    if (brw3) {                        // r - B*K underflowed -> add p once
+        UADDO1(r[0], 0xFFFFFFFEFFFFFC2FULL);
+        UADDC1(r[1], 0xFFFFFFFFFFFFFFFFULL);
+        UADDC1(r[2], 0xFFFFFFFFFFFFFFFFULL);
+        UADD1(r[3], 0xFFFFFFFFFFFFFFFFULL);
     }
 }
 
