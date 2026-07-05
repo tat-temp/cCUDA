@@ -176,7 +176,11 @@ dpw,_     = cmp(pwrA, pwrB, "power",       " W",   1) if pwrA else (None,False)
 if draw is not None and dclk is not None and rsep and csep and (draw>0)==(dclk>0):
     hi = B if draw>0 else A
     pnote = ""
-    if dpw is not None: pnote = f", at {'LOWER' if (dpw<0)==(draw>0) else 'HIGHER'} power"
+    if dpw is not None:
+        if abs(dpw) < 1.0:   # both pinned at the power cap -> the win is efficiency, shown as clock not watts
+            pnote = f", at EQUAL power (both ~{st.mean(pwrB):.0f}W cap) -> {hi} is MORE EFFICIENT (more keys/watt)"
+        else:
+            pnote = f", at {'LOWER' if (dpw<0)==(draw>0) else 'HIGHER'} power"
     print(f">>> ENDOGENOUS clock: {hi} sustains a higher sustained clock{pnote} -> RAW Mk/s is the honest metric.")
     print(f">>> {hi} wins on RAW throughput with TOTAL SEPARATION. Real ONLY IF proof.py is green AND it reproduces.")
 elif dclk is not None and not csep:
