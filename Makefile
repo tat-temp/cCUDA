@@ -15,7 +15,11 @@ NATIVE_GENCODE := -gencode arch=compute_$(GPU_ARCH),code=sm_$(GPU_ARCH)
 # found-flag polls removed; host stops scheduling between launches). main carries no such
 # flag and is the baseline arm. If it wins, bake the behavior into the source and delete
 # this; if it loses, it dies with the branch. See the HOST_ONLY_FOUND_STOP note in
-# CUDACyclone.cu. Override at the CLI with `make AB_FLAGS=` to force a baseline build here.
+# CUDACyclone.cu.
+# NOTE: f1 ALSO moves the found-flag + hash counter to zero-copy (mapped) host memory
+# unconditionally. That is only coherent with polls REMOVED -- so the baseline arm is
+# `main`, NOT `make AB_FLAGS=` on f1 (that rebuilds the in-kernel polls but leaves the flag
+# in mapped memory, so every poll becomes a PCIe read: pathologically slow, not a baseline).
 AB_FLAGS   ?= -DHOST_ONLY_FOUND_STOP
 
 NVCC_FLAGS := -O3 -rdc=true -use_fast_math --ptxas-options=-O3 $(GENCODE) $(AB_FLAGS)
