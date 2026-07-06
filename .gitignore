@@ -5,7 +5,6 @@
 /.vs
 
 # build artifacts (built on the GPU box, not committed)
-/CUDACyclone-legacy
 /CUDACyclone-ecgen
 /CUDACyclone-shaonly
 /CUDACyclone-ptxinfo
