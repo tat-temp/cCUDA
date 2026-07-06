@@ -2,43 +2,33 @@ __host__ __forceinline__ void add256_u64(const uint64_t a[4], uint64_t b, uint64
     __uint128_t sum = (__uint128_t)a[0] + b;
     out[0] = (uint64_t)sum;
     uint64_t carry = (uint64_t)(sum >> 64);
-    for (int i = 1; i < 4; ++i) {
-        sum = (__uint128_t)a[i] + carry;
-        out[i] = (uint64_t)sum;
-        carry = (uint64_t)(sum >> 64);
-    }
+    sum = (__uint128_t)a[1] + carry; out[1] = (uint64_t)sum; carry = (uint64_t)(sum >> 64);
+    sum = (__uint128_t)a[2] + carry; out[2] = (uint64_t)sum; carry = (uint64_t)(sum >> 64);
+    sum = (__uint128_t)a[3] + carry; out[3] = (uint64_t)sum; carry = (uint64_t)(sum >> 64);
 }
 
 __host__ __forceinline__ void add256(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
     __uint128_t carry = 0;
-    for (int i = 0; i < 4; ++i) {
-        __uint128_t s = (__uint128_t)a[i] + b[i] + carry;
-        out[i] = (uint64_t)s;
-        carry = s >> 64;
-    }
+    { __uint128_t s = (__uint128_t)a[0] + b[0] + carry; out[0] = (uint64_t)s; carry = s >> 64; }
+    { __uint128_t s = (__uint128_t)a[1] + b[1] + carry; out[1] = (uint64_t)s; carry = s >> 64; }
+    { __uint128_t s = (__uint128_t)a[2] + b[2] + carry; out[2] = (uint64_t)s; carry = s >> 64; }
+    { __uint128_t s = (__uint128_t)a[3] + b[3] + carry; out[3] = (uint64_t)s; carry = s >> 64; }
 }
 
 __host__ __forceinline__ void sub256(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
     uint64_t borrow = 0;
-    for (int i = 0; i < 4; ++i) {
-        uint64_t bi = b[i] + borrow;
-        if (a[i] < bi) {
-            out[i] = (uint64_t)(((__uint128_t(1) << 64) + a[i]) - bi);
-            borrow = 1;
-        } else {
-            out[i] = a[i] - bi;
-            borrow = 0;
-        }
-    }
+    { uint64_t bi = b[0] + borrow; if (a[0] < bi) { out[0] = (uint64_t)(((__uint128_t(1) << 64) + a[0]) - bi); borrow = 1; } else { out[0] = a[0] - bi; borrow = 0; } }
+    { uint64_t bi = b[1] + borrow; if (a[1] < bi) { out[1] = (uint64_t)(((__uint128_t(1) << 64) + a[1]) - bi); borrow = 1; } else { out[1] = a[1] - bi; borrow = 0; } }
+    { uint64_t bi = b[2] + borrow; if (a[2] < bi) { out[2] = (uint64_t)(((__uint128_t(1) << 64) + a[2]) - bi); borrow = 1; } else { out[2] = a[2] - bi; borrow = 0; } }
+    { uint64_t bi = b[3] + borrow; if (a[3] < bi) { out[3] = (uint64_t)(((__uint128_t(1) << 64) + a[3]) - bi); borrow = 1; } else { out[3] = a[3] - bi; borrow = 0; } }
 }
 
 __host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor, uint64_t quotient[4], uint64_t &remainder) {
     remainder = 0;
-    for (int i = 3; i >= 0; --i) {
-        __uint128_t cur = (__uint128_t(remainder) << 64) | value[i];
-        quotient[i] = (uint64_t)(cur / divisor);
-        remainder = (uint64_t)(cur % divisor);
-    }
+    { __uint128_t cur = (__uint128_t(remainder) << 64) | value[3]; quotient[3] = (uint64_t)(cur / divisor); remainder = (uint64_t)(cur % divisor); }
+    { __uint128_t cur = (__uint128_t(remainder) << 64) | value[2]; quotient[2] = (uint64_t)(cur / divisor); remainder = (uint64_t)(cur % divisor); }
+    { __uint128_t cur = (__uint128_t(remainder) << 64) | value[1]; quotient[1] = (uint64_t)(cur / divisor); remainder = (uint64_t)(cur % divisor); }
+    { __uint128_t cur = (__uint128_t(remainder) << 64) | value[0]; quotient[0] = (uint64_t)(cur / divisor); remainder = (uint64_t)(cur % divisor); }
 }
 
 bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
@@ -47,26 +37,43 @@ bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
     if (h.size() > 64) return false;
     if (h.size() < 64) h = std::string(64 - h.size(), '0') + h;
     if (h.size() != 64) return false;
-    for (int i = 0; i < 4; ++i) {
-        std::string part = h.substr(i * 16, 16);
-        w[3 - i] = std::stoull(part, nullptr, 16);
-    }
+    w[3] = std::stoull(h.substr( 0, 16), nullptr, 16);
+    w[2] = std::stoull(h.substr(16, 16), nullptr, 16);
+    w[1] = std::stoull(h.substr(32, 16), nullptr, 16);
+    w[0] = std::stoull(h.substr(48, 16), nullptr, 16);
     return true;
 }
 bool hexToHash160(const std::string& h, uint8_t hash160[20]) {
     if (h.size() != 40) return false;
-    for (int i = 0; i < 20; ++i) {
-        std::string byteStr = h.substr(i * 2, 2);
-        hash160[i] = (uint8_t)std::stoul(byteStr, nullptr, 16);
-    }
+    hash160[ 0] = (uint8_t)std::stoul(h.substr( 0, 2), nullptr, 16);
+    hash160[ 1] = (uint8_t)std::stoul(h.substr( 2, 2), nullptr, 16);
+    hash160[ 2] = (uint8_t)std::stoul(h.substr( 4, 2), nullptr, 16);
+    hash160[ 3] = (uint8_t)std::stoul(h.substr( 6, 2), nullptr, 16);
+    hash160[ 4] = (uint8_t)std::stoul(h.substr( 8, 2), nullptr, 16);
+    hash160[ 5] = (uint8_t)std::stoul(h.substr(10, 2), nullptr, 16);
+    hash160[ 6] = (uint8_t)std::stoul(h.substr(12, 2), nullptr, 16);
+    hash160[ 7] = (uint8_t)std::stoul(h.substr(14, 2), nullptr, 16);
+    hash160[ 8] = (uint8_t)std::stoul(h.substr(16, 2), nullptr, 16);
+    hash160[ 9] = (uint8_t)std::stoul(h.substr(18, 2), nullptr, 16);
+    hash160[10] = (uint8_t)std::stoul(h.substr(20, 2), nullptr, 16);
+    hash160[11] = (uint8_t)std::stoul(h.substr(22, 2), nullptr, 16);
+    hash160[12] = (uint8_t)std::stoul(h.substr(24, 2), nullptr, 16);
+    hash160[13] = (uint8_t)std::stoul(h.substr(26, 2), nullptr, 16);
+    hash160[14] = (uint8_t)std::stoul(h.substr(28, 2), nullptr, 16);
+    hash160[15] = (uint8_t)std::stoul(h.substr(30, 2), nullptr, 16);
+    hash160[16] = (uint8_t)std::stoul(h.substr(32, 2), nullptr, 16);
+    hash160[17] = (uint8_t)std::stoul(h.substr(34, 2), nullptr, 16);
+    hash160[18] = (uint8_t)std::stoul(h.substr(36, 2), nullptr, 16);
+    hash160[19] = (uint8_t)std::stoul(h.substr(38, 2), nullptr, 16);
     return true;
 }
 std::string formatHex256(const uint64_t limbs[4]) {
     std::ostringstream oss;
     oss << std::hex << std::uppercase << std::setfill('0');
-    for (int i = 3; i >= 0; --i) {
-        oss << std::setw(16) << limbs[i];
-    }
+    oss << std::setw(16) << limbs[3];
+    oss << std::setw(16) << limbs[2];
+    oss << std::setw(16) << limbs[1];
+    oss << std::setw(16) << limbs[0];
     return oss.str();
 }
 
@@ -80,10 +87,11 @@ static __device__ __forceinline__ bool hash160_prefix_equals(
 static __device__ __forceinline__ bool hash160_matches_full(
     const uint32_t h5[5], const uint32_t target_w[5])
 {
-#pragma unroll
-    for (int k = 0; k < 5; ++k) {
-        if (h5[k] != target_w[k]) return false;
-    }
+    if (h5[0] != target_w[0]) return false;
+    if (h5[1] != target_w[1]) return false;
+    if (h5[2] != target_w[2]) return false;
+    if (h5[3] != target_w[3]) return false;
+    if (h5[4] != target_w[4]) return false;
     return true;
 }
 
@@ -96,14 +104,9 @@ __device__ __forceinline__ bool ge256_u64(const uint64_t a[4], uint64_t b) {
 __device__ __forceinline__ void sub256_u64_inplace(uint64_t a[4], uint64_t dec) {
     uint64_t borrow = (a[0] < dec) ? 1ull : 0ull;
     a[0] = a[0] - dec;
-#pragma unroll
-    for (int i = 1; i < 4; ++i) {
-        uint64_t ai = a[i];
-        uint64_t bi = borrow;
-        a[i] = ai - bi;
-        borrow = (ai < bi) ? 1ull : 0ull;
-        if (!borrow) break;
-    }
+    { uint64_t ai = a[1]; a[1] = ai - borrow; borrow = (ai < borrow) ? 1ull : 0ull; }
+    { uint64_t ai = a[2]; a[2] = ai - borrow; borrow = (ai < borrow) ? 1ull : 0ull; }
+    { uint64_t ai = a[3]; a[3] = ai - borrow; borrow = (ai < borrow) ? 1ull : 0ull; }
 }
 
 __device__ __forceinline__ unsigned long long warp_reduce_add_ull(unsigned long long v) {
@@ -131,18 +134,45 @@ static inline long double ld_from_u256(const uint64_t v[4]) {
 static inline std::string formatCompressedPubHex(const uint64_t Rx[4], const uint64_t Ry[4]) {
     uint8_t out[33];
     out[0] = (Ry[0] & 1ULL) ? 0x03 : 0x02;
-    int off=1;
-    for (int limb=3; limb>=0; --limb) {
-        uint64_t v = Rx[limb];
-        out[off+0]=(uint8_t)(v>>56); out[off+1]=(uint8_t)(v>>48);
-        out[off+2]=(uint8_t)(v>>40); out[off+3]=(uint8_t)(v>>32);
-        out[off+4]=(uint8_t)(v>>24); out[off+5]=(uint8_t)(v>>16);
-        out[off+6]=(uint8_t)(v>> 8); out[off+7]=(uint8_t)(v>> 0);
-        off+=8;
-    }
+    { uint64_t v = Rx[3]; out[ 1]=(uint8_t)(v>>56); out[ 2]=(uint8_t)(v>>48); out[ 3]=(uint8_t)(v>>40); out[ 4]=(uint8_t)(v>>32); out[ 5]=(uint8_t)(v>>24); out[ 6]=(uint8_t)(v>>16); out[ 7]=(uint8_t)(v>>8); out[ 8]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[2]; out[ 9]=(uint8_t)(v>>56); out[10]=(uint8_t)(v>>48); out[11]=(uint8_t)(v>>40); out[12]=(uint8_t)(v>>32); out[13]=(uint8_t)(v>>24); out[14]=(uint8_t)(v>>16); out[15]=(uint8_t)(v>>8); out[16]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[1]; out[17]=(uint8_t)(v>>56); out[18]=(uint8_t)(v>>48); out[19]=(uint8_t)(v>>40); out[20]=(uint8_t)(v>>32); out[21]=(uint8_t)(v>>24); out[22]=(uint8_t)(v>>16); out[23]=(uint8_t)(v>>8); out[24]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[0]; out[25]=(uint8_t)(v>>56); out[26]=(uint8_t)(v>>48); out[27]=(uint8_t)(v>>40); out[28]=(uint8_t)(v>>32); out[29]=(uint8_t)(v>>24); out[30]=(uint8_t)(v>>16); out[31]=(uint8_t)(v>>8); out[32]=(uint8_t)(v>>0); }
     static const char* hexd="0123456789ABCDEF";
     std::string s; s.resize(66);
-    for (int i=0;i<33;++i){ s[2*i]=hexd[(out[i]>>4)&0xF]; s[2*i+1]=hexd[out[i]&0xF]; }
+    s[ 0]=hexd[(out[ 0]>>4)&0xF]; s[ 1]=hexd[out[ 0]&0xF];
+    s[ 2]=hexd[(out[ 1]>>4)&0xF]; s[ 3]=hexd[out[ 1]&0xF];
+    s[ 4]=hexd[(out[ 2]>>4)&0xF]; s[ 5]=hexd[out[ 2]&0xF];
+    s[ 6]=hexd[(out[ 3]>>4)&0xF]; s[ 7]=hexd[out[ 3]&0xF];
+    s[ 8]=hexd[(out[ 4]>>4)&0xF]; s[ 9]=hexd[out[ 4]&0xF];
+    s[10]=hexd[(out[ 5]>>4)&0xF]; s[11]=hexd[out[ 5]&0xF];
+    s[12]=hexd[(out[ 6]>>4)&0xF]; s[13]=hexd[out[ 6]&0xF];
+    s[14]=hexd[(out[ 7]>>4)&0xF]; s[15]=hexd[out[ 7]&0xF];
+    s[16]=hexd[(out[ 8]>>4)&0xF]; s[17]=hexd[out[ 8]&0xF];
+    s[18]=hexd[(out[ 9]>>4)&0xF]; s[19]=hexd[out[ 9]&0xF];
+    s[20]=hexd[(out[10]>>4)&0xF]; s[21]=hexd[out[10]&0xF];
+    s[22]=hexd[(out[11]>>4)&0xF]; s[23]=hexd[out[11]&0xF];
+    s[24]=hexd[(out[12]>>4)&0xF]; s[25]=hexd[out[12]&0xF];
+    s[26]=hexd[(out[13]>>4)&0xF]; s[27]=hexd[out[13]&0xF];
+    s[28]=hexd[(out[14]>>4)&0xF]; s[29]=hexd[out[14]&0xF];
+    s[30]=hexd[(out[15]>>4)&0xF]; s[31]=hexd[out[15]&0xF];
+    s[32]=hexd[(out[16]>>4)&0xF]; s[33]=hexd[out[16]&0xF];
+    s[34]=hexd[(out[17]>>4)&0xF]; s[35]=hexd[out[17]&0xF];
+    s[36]=hexd[(out[18]>>4)&0xF]; s[37]=hexd[out[18]&0xF];
+    s[38]=hexd[(out[19]>>4)&0xF]; s[39]=hexd[out[19]&0xF];
+    s[40]=hexd[(out[20]>>4)&0xF]; s[41]=hexd[out[20]&0xF];
+    s[42]=hexd[(out[21]>>4)&0xF]; s[43]=hexd[out[21]&0xF];
+    s[44]=hexd[(out[22]>>4)&0xF]; s[45]=hexd[out[22]&0xF];
+    s[46]=hexd[(out[23]>>4)&0xF]; s[47]=hexd[out[23]&0xF];
+    s[48]=hexd[(out[24]>>4)&0xF]; s[49]=hexd[out[24]&0xF];
+    s[50]=hexd[(out[25]>>4)&0xF]; s[51]=hexd[out[25]&0xF];
+    s[52]=hexd[(out[26]>>4)&0xF]; s[53]=hexd[out[26]&0xF];
+    s[54]=hexd[(out[27]>>4)&0xF]; s[55]=hexd[out[27]&0xF];
+    s[56]=hexd[(out[28]>>4)&0xF]; s[57]=hexd[out[28]&0xF];
+    s[58]=hexd[(out[29]>>4)&0xF]; s[59]=hexd[out[29]&0xF];
+    s[60]=hexd[(out[30]>>4)&0xF]; s[61]=hexd[out[30]&0xF];
+    s[62]=hexd[(out[31]>>4)&0xF]; s[63]=hexd[out[31]&0xF];
+    s[64]=hexd[(out[32]>>4)&0xF]; s[65]=hexd[out[32]&0xF];
     return s;
 }
 

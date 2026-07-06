@@ -9,8 +9,8 @@ Special thanks to Jean-Luc Pons for his foundational contributions to the crypto
 The secp256k1 **field arithmetic** (modular multiply / square / inverse) now uses
 [RetiredC/RCKangaroo](https://github.com/RetiredC/RCKangaroo)'s implementations
 (vendored in `third_party/RCKangaroo/`) — a 32-bit-limb `MulModP`/`SqrModP` plus a safegcd
-`InvModP` — measured **~+8.5% end-to-end on an RTX 5090**. Build with `make legacy`
-(`-DUSE_CYCLONE_FIELD`) to fall back to the previous JeanLucPons-lineage field ops.
+`InvModP` — measured **~+8.5% end-to-end on an RTX 5090** over the previous
+JeanLucPons-lineage field math (since removed).
 **RCKangaroo and VanitySearch are GPLv3, so this project is licensed under GPL v3 — see [LICENSE](LICENSE).**
 
 Cyclone CUDA also is the **simplest CUDA-based project** for solving Satoshi puzzles on GPU.  
@@ -230,5 +230,4 @@ It incorporates and derives from GPLv3-licensed work:
 - **EC math lineage**: [VanitySearch](https://github.com/JeanLucPons/VanitySearch) © Jean-Luc Pons, GPLv3.
 
 Because these components are GPLv3, any distributed build of CUDACyclone is a GPLv3 derivative
-and must be distributed under the same license, with source available. The `make legacy`
-(`-DUSE_CYCLONE_FIELD`) build still links the VanitySearch-lineage field math, so it is GPLv3 too.
+and must be distributed under the same license, with source available.

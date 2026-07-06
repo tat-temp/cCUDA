@@ -33,21 +33,33 @@ namespace host_sha256 {
 
         auto process = [&](const uint8_t b[64]){
             uint32_t W[64];
-            for (int i=0;i<16;++i){
-                W[i] = ( (uint32_t)b[4*i+0]<<24 )|
-                       ( (uint32_t)b[4*i+1]<<16 )|
-                       ( (uint32_t)b[4*i+2]<<8  )|
-                       ( (uint32_t)b[4*i+3]<<0  );
-            }
-            for (int t=16;t<64;++t)
-                W[t] = SSIG1(W[t-2]) + W[t-7] + SSIG0(W[t-15]) + W[t-16];
-
+#define WLD(i) W[i] = ((uint32_t)b[4*(i)+0]<<24)|((uint32_t)b[4*(i)+1]<<16)|((uint32_t)b[4*(i)+2]<<8)|((uint32_t)b[4*(i)+3]<<0)
+            WLD( 0); WLD( 1); WLD( 2); WLD( 3); WLD( 4); WLD( 5); WLD( 6); WLD( 7);
+            WLD( 8); WLD( 9); WLD(10); WLD(11); WLD(12); WLD(13); WLD(14); WLD(15);
+#undef WLD
+#define SCH(t) W[t] = SSIG1(W[(t)-2]) + W[(t)-7] + SSIG0(W[(t)-15]) + W[(t)-16]
+            SCH(16); SCH(17); SCH(18); SCH(19); SCH(20); SCH(21); SCH(22); SCH(23);
+            SCH(24); SCH(25); SCH(26); SCH(27); SCH(28); SCH(29); SCH(30); SCH(31);
+            SCH(32); SCH(33); SCH(34); SCH(35); SCH(36); SCH(37); SCH(38); SCH(39);
+            SCH(40); SCH(41); SCH(42); SCH(43); SCH(44); SCH(45); SCH(46); SCH(47);
+            SCH(48); SCH(49); SCH(50); SCH(51); SCH(52); SCH(53); SCH(54); SCH(55);
+            SCH(56); SCH(57); SCH(58); SCH(59); SCH(60); SCH(61); SCH(62); SCH(63);
+#undef SCH
             uint32_t a=H[0],b_=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
-            for (int t=0;t<64;++t){
-                uint32_t T1 = h + BSIG1(e) + Ch(e,f,g) + K[t] + W[t];
-                uint32_t T2 = BSIG0(a) + Maj(a,b_,c);
-                h=g; g=f; f=e; e=d+T1; d=c; c=b_; b_=a; a=T1+T2;
-            }
+#define RND(t) do { \
+                uint32_t T1 = h + BSIG1(e) + Ch(e,f,g) + K[t] + W[t]; \
+                uint32_t T2 = BSIG0(a) + Maj(a,b_,c); \
+                h=g; g=f; f=e; e=d+T1; d=c; c=b_; b_=a; a=T1+T2; \
+            } while(0)
+            RND( 0); RND( 1); RND( 2); RND( 3); RND( 4); RND( 5); RND( 6); RND( 7);
+            RND( 8); RND( 9); RND(10); RND(11); RND(12); RND(13); RND(14); RND(15);
+            RND(16); RND(17); RND(18); RND(19); RND(20); RND(21); RND(22); RND(23);
+            RND(24); RND(25); RND(26); RND(27); RND(28); RND(29); RND(30); RND(31);
+            RND(32); RND(33); RND(34); RND(35); RND(36); RND(37); RND(38); RND(39);
+            RND(40); RND(41); RND(42); RND(43); RND(44); RND(45); RND(46); RND(47);
+            RND(48); RND(49); RND(50); RND(51); RND(52); RND(53); RND(54); RND(55);
+            RND(56); RND(57); RND(58); RND(59); RND(60); RND(61); RND(62); RND(63);
+#undef RND
             H[0]+=a; H[1]+=b_; H[2]+=c; H[3]+=d; H[4]+=e; H[5]+=f; H[6]+=g; H[7]+=h;
         };
 
@@ -65,12 +77,14 @@ namespace host_sha256 {
         block[56] = (uint8_t)(bitlen >> 56);
         process(block);
 
-        for (int i=0;i<8;++i){
-            out[4*i+0] = (uint8_t)(H[i] >> 24);
-            out[4*i+1] = (uint8_t)(H[i] >> 16);
-            out[4*i+2] = (uint8_t)(H[i] >> 8 );
-            out[4*i+3] = (uint8_t)(H[i] >> 0 );
-        }
+        out[ 0]=(uint8_t)(H[0]>>24); out[ 1]=(uint8_t)(H[0]>>16); out[ 2]=(uint8_t)(H[0]>>8); out[ 3]=(uint8_t)(H[0]>>0);
+        out[ 4]=(uint8_t)(H[1]>>24); out[ 5]=(uint8_t)(H[1]>>16); out[ 6]=(uint8_t)(H[1]>>8); out[ 7]=(uint8_t)(H[1]>>0);
+        out[ 8]=(uint8_t)(H[2]>>24); out[ 9]=(uint8_t)(H[2]>>16); out[10]=(uint8_t)(H[2]>>8); out[11]=(uint8_t)(H[2]>>0);
+        out[12]=(uint8_t)(H[3]>>24); out[13]=(uint8_t)(H[3]>>16); out[14]=(uint8_t)(H[3]>>8); out[15]=(uint8_t)(H[3]>>0);
+        out[16]=(uint8_t)(H[4]>>24); out[17]=(uint8_t)(H[4]>>16); out[18]=(uint8_t)(H[4]>>8); out[19]=(uint8_t)(H[4]>>0);
+        out[20]=(uint8_t)(H[5]>>24); out[21]=(uint8_t)(H[5]>>16); out[22]=(uint8_t)(H[5]>>8); out[23]=(uint8_t)(H[5]>>0);
+        out[24]=(uint8_t)(H[6]>>24); out[25]=(uint8_t)(H[6]>>16); out[26]=(uint8_t)(H[6]>>8); out[27]=(uint8_t)(H[6]>>0);
+        out[28]=(uint8_t)(H[7]>>24); out[29]=(uint8_t)(H[7]>>16); out[30]=(uint8_t)(H[7]>>8); out[31]=(uint8_t)(H[7]>>0);
     }
 
     static void sha256d(const uint8_t* data, size_t len, uint8_t out[32]){
