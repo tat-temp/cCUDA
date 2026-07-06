@@ -59,6 +59,23 @@ __device__ __forceinline__ bool warp_found_ready(const int* __restrict__ d_found
 #define FOUND_POLL_MASK 31u
 #endif
 
+// HOST_ONLY_FOUND_STOP (A/B flag, default off): when defined, the kernel does NOT poll the
+// global found-flag to abort in-flight work. The finding warp still publishes its result via
+// atomicCAS + FOUND_READY exactly as before; the host already reads the flag between launches
+// (see the launch loop in main) and simply stops scheduling further work once it is set. This
+// compiles out the entry poll, the per-batch poll, and the throttled hot-loop poll -- each a
+// volatile L2 load + __shfl_sync broadcast + branch -- removing them from the steady state
+// entirely. Trade-off: after the (single, terminal) find, the one in-flight launch runs to
+// completion instead of aborting early -- at most one launch of wasted compute, once per run,
+// which is negligible wall-clock. It is also strictly safer w.r.t. the historical prefix-skip
+// bug: every launch now reaches its normal per-thread state write-back. Bake the winner and
+// drop the flag once A/B'd on the box (bench_ab.sh, raw keys/s verdict).
+#ifndef HOST_ONLY_FOUND_STOP
+#define FOUND_POLL(stmt) stmt
+#else
+#define FOUND_POLL(stmt)
+#endif
+
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Jx[4];
@@ -90,7 +107,7 @@ __global__ void kernel_point_add_and_check_oneinv(
 
     const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
     const unsigned full_mask = 0xFFFFFFFFu;
-    if (warp_found_ready(d_found_flag, full_mask, lane)) return;
+    FOUND_POLL( if (warp_found_ready(d_found_flag, full_mask, lane)) return; )
 
     const uint32_t target_prefix = c_target_words[0];
 
@@ -125,7 +142,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     uint32_t batches_done = 0;
 
     while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
-        if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
+        FOUND_POLL( if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; } )
 
         {
             uint32_t h5[5];
@@ -172,8 +189,8 @@ __global__ void kernel_point_add_and_check_oneinv(
         _ModInv(inverse);
 
         for (int i = 0; i < half - 1; ++i) {
-            if (((unsigned)i & FOUND_POLL_MASK) == 0u &&
-                warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
+            FOUND_POLL( if (((unsigned)i & FOUND_POLL_MASK) == 0u &&
+                warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; } )
 
             uint64_t dx_inv_i[4];
             _ModMult(dx_inv_i, subp[i], inverse);
