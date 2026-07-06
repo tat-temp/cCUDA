@@ -474,16 +474,15 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
     st[6] = 0x1f83d9abu;
     st[7] = 0x5be0cd19u;
     SHA256Transform(st, M);
-#pragma unroll
-    for(int i=0;i<8;++i) out_state[i]= bswap32(st[i]);
+    out_state[0]=bswap32(st[0]); out_state[1]=bswap32(st[1]); out_state[2]=bswap32(st[2]); out_state[3]=bswap32(st[3]);
+    out_state[4]=bswap32(st[4]); out_state[5]=bswap32(st[5]); out_state[6]=bswap32(st[6]); out_state[7]=bswap32(st[7]);
 }
 
 __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_le[16],
                                                             uint32_t out5[5])
 {
     sha_state_le[8]  = 0x00000080u;
-#pragma unroll
-    for(int i=9;i<14;++i) sha_state_le[i]=0;
+    sha_state_le[9]=0u; sha_state_le[10]=0u; sha_state_le[11]=0u; sha_state_le[12]=0u; sha_state_le[13]=0u;
     sha_state_le[14] = 256u;
     sha_state_le[15] = 0u;
 
@@ -506,12 +505,5 @@ __device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
-#ifndef SHA_ONLY
     RIPEMD160_from_SHA256_state(sha_state, out5);
-#else
-    // SHA-only benchmark (-DSHA_ONLY): skip RIPEMD-160; emit the SHA-256 words directly
-    // so the SHA-256 work stays live and out5 is still written.
-#pragma unroll
-    for (int i = 0; i < 5; ++i) out5[i] = sha_state[i];
-#endif
 }

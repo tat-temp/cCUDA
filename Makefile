@@ -14,7 +14,7 @@ CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
 
-.PHONY: all clean ecgen shaonly ptxinfo sass resusage
+.PHONY: all clean ptxinfo sass resusage
 
 all: $(TARGET)
 
@@ -23,18 +23,6 @@ all: $(TARGET)
 
 $(TARGET): $(OBJ)
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) $(OBJ) -o $@ $(LDFLAGS)
-
-# EC-generation-only benchmark: the identical kernel built with -DEC_GEN_ONLY, which
-# skips SHA-256/RIPEMD-160 + the address match (a tiny XOR sink keeps the EC math live).
-ecgen: CUDACyclone-ecgen
-CUDACyclone-ecgen: $(SRC) $(HDRS)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DEC_GEN_ONLY $(SRC) -o $@ $(LDFLAGS)
-
-# SHA-only benchmark: same kernel that hashes with SHA-256 but skips RIPEMD-160 (-DSHA_ONLY),
-# to split the hashing cost. Compare full vs shaonly vs ecgen.
-shaonly: CUDACyclone-shaonly
-CUDACyclone-shaonly: $(SRC) $(HDRS)
-	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -DSHA_ONLY $(SRC) -o $@ $(LDFLAGS)
 
 %.o: %.cu $(HDRS) third_party/RCKangaroo/RCGpuUtils.h
 	$(CC) $(NVCC_FLAGS) $(CXXFLAGS) -c $< -o $@
@@ -60,5 +48,4 @@ sass: $(TARGET)
 	cuobjdump -sass $(TARGET)
 
 clean:
-	rm -f $(TARGET) CUDACyclone-ecgen CUDACyclone-shaonly \
-	      CUDACyclone-ptxinfo $(OBJ)
+	rm -f $(TARGET) CUDACyclone-ptxinfo $(OBJ)

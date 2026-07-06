@@ -8,14 +8,6 @@
 #include "ec_backend.cuh"
 
 
-// f1 experiment: fuse the two consecutive `x3 = lam^2 - x1 - <pt>` modular subtractions in the
-// point-add hot path into one ModSub256_2 call (single reduction). Default ON for this branch;
-// build with -DTERNARY_SUB=0 to get the byte-identical two-call baseline for a same-checkout A/B.
-#ifndef TERNARY_SUB
-#define TERNARY_SUB 1
-#endif
-
-
 #define UADDO(c, a, b) asm volatile ("add.cc.u64 %0, %1, %2;" : "=l"(c) : "l"(a), "l"(b) : "memory" );
 #define UADDC(c, a, b) asm volatile ("addc.cc.u64 %0, %1, %2;" : "=l"(c) : "l"(a), "l"(b) : "memory" );
 #define UADD(c, a, b) asm volatile ("addc.u64 %0, %1, %2;" : "=l"(c) : "l"(a), "l"(b));
@@ -381,13 +373,10 @@ __device__ void scalarMulBaseAffine(const uint64_t scalar_le[4], uint64_t outX[4
     pointSetInfinity(R);
 
     int msb = -1;
-    for (int limb = 3; limb >= 0; --limb) {
-        uint64_t v = scalar_le[limb];
-        if (v != 0) {
-            msb = limb * 64 + 63 - __clzll(v);
-            break;
-        }
-    }
+    if      (scalar_le[3] != 0) msb = 3 * 64 + 63 - __clzll(scalar_le[3]);
+    else if (scalar_le[2] != 0) msb = 2 * 64 + 63 - __clzll(scalar_le[2]);
+    else if (scalar_le[1] != 0) msb = 1 * 64 + 63 - __clzll(scalar_le[1]);
+    else if (scalar_le[0] != 0) msb = 0 * 64 + 63 - __clzll(scalar_le[0]);
 
     if (msb == -1) {
         // scalar == 0 -> infinity
