@@ -10,7 +10,6 @@
 #endif
 
 #define NBBLOCK 5
-#define BIFULLSIZE 40
 
 // f1 experiment: fuse the two consecutive `x3 = lam^2 - x1 - <pt>` modular subtractions in the
 // point-add hot path into one ModSub256_2 call (single reduction). Default ON for this branch;
@@ -44,24 +43,22 @@
 #define MADDS(r,a,b,c) asm volatile ("madc.hi.s64 %0, %1, %2, %3;" : "=l"(r) : "l"(a), "l"(b), "l"(c));
 
 
-#define HSIZE (GRP_SIZE / 2 - 1)
-
+// MM64 is used only by the legacy (-DUSE_CYCLONE_FIELD) _ModInv; MSK62 is provided
+// as a macro below (the former __constant__ MSK62 was shadowed by it and thus dead).
 __device__ __constant__ uint64_t MM64 = 0xD838091DD2253531ULL;
-__device__ __constant__ uint64_t MSK62 = 0x3FFFFFFFFFFFFFFFULL;
 
-#define _IsPositive(x) (((int64_t)(x[4]))>=0LL)
 #define _IsNegative(x) (((int64_t)(x[4]))<0LL)
-#define _IsEqual(a,b)  ((a[4] == b[4]) && (a[3] == b[3]) && (a[2] == b[2]) && (a[1] == b[1]) && (a[0] == b[0]))
 #define _IsZero(a)     ((a[4] | a[3] | a[2] | a[1] | a[0]) == 0ULL)
 #define _IsOne(a)      ((a[4] == 0ULL) && (a[3] == 0ULL) && (a[2] == 0ULL) && (a[1] == 0ULL) && (a[0] == 1ULL))
 
-#define IDX threadIdx.x
-
-#define bswap32(v) __byte_perm(v, 0, 0x0123)
-
-#define __sright128(a,b,n) ((a)>>(n))|((b)<<(64-(n)))
 #define __sleft128(a,b,n) ((b)<<(n))|((a)>>(64-(n)))
 
+// ===== Legacy (-DUSE_CYCLONE_FIELD) field-arithmetic helpers ========================
+// Everything inside the #ifdef USE_CYCLONE_FIELD guards below serves only the
+// JeanLucPons-lineage _ModInv/_ModMult/_ModSqr. The default RCKangaroo build never
+// references them (nvcc already dead-stripped them); the guards just make that explicit
+// and keep the default-build reader focused on the shared ops (ModSub256*, ModNeg256).
+#ifdef USE_CYCLONE_FIELD  // island A: AddP/SubP/Neg/UMult/Load + ShiftR62
 #define AddP(r) { \
   UADDO1(r[0], 0xFFFFFFFEFFFFFC2FULL); \
   UADDC1(r[1], 0xFFFFFFFFFFFFFFFFULL); \
@@ -109,6 +106,7 @@ __device__ void ShiftR62(uint64_t r[5]) {
   r[4] = (int64_t)(r[4]) >> 62;
 
 }
+#endif  // USE_CYCLONE_FIELD -- island A
 
 __device__ void ModSub256isOdd(uint64_t* a, uint64_t* b, uint8_t* parity) {    //no need to compute py, we need only parity
 
@@ -126,6 +124,7 @@ __device__ void ModSub256isOdd(uint64_t* a, uint64_t* b, uint8_t* parity) {    /
 }
 
 
+#ifdef USE_CYCLONE_FIELD  // island B: ShiftR62/IMult/IMultC/MulP
 __device__ void ShiftR62(uint64_t dest[5],uint64_t r[5],uint64_t carry) {
 
   dest[0] = (r[1] << 2) | (r[0] >> 62);
@@ -209,6 +208,7 @@ __device__ void MulP(uint64_t *r,uint64_t a) {
   USUB(r[4],a,0ULL);
 
 }
+#endif  // USE_CYCLONE_FIELD -- island B
 
 __device__ void ModNeg256(uint64_t *r,uint64_t *a) {
 
@@ -304,6 +304,7 @@ __device__ void ModSub256_2(uint64_t* r, const uint64_t* a, const uint64_t* b, c
     }
 }
 
+#ifdef USE_CYCLONE_FIELD  // island C: ctz/_DivStep62/MatrixVecMul*/AddCh + legacy _ModInv
 __device__ __forceinline__ uint32_t ctz(uint64_t x) {
   uint32_t n;
   asm("{\n\t"
@@ -443,7 +444,6 @@ __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry) {
 
 }
 
-#ifdef USE_CYCLONE_FIELD
 __device__ __noinline__ void _ModInv(uint64_t* R) {
 
     // Compute modular inverse of R mop P (using 320bits signed integer)
@@ -553,6 +553,7 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
 __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
 #endif
 
+#ifdef USE_CYCLONE_FIELD  // island D: UMultSpecial + legacy _ModMult/_ModSqr
 #define UMultSpecial(r, a) {\
   uint64_t temp; /* Dichiarazione di temp qui */\
   r[0] = (a[0] << 32) + (a[0] << 9) + (a[0] << 8) + (a[0] << 7) + (a[0] << 6) + (a[0] << 4) + a[0]; \
@@ -567,7 +568,6 @@ __device__ __forceinline__ void _ModInv(uint64_t* R){ rck::rinv(R); }
   MADD(r[4], a[3], 0x1000003D1ULL, 0ULL); \
 }
 
-#ifdef USE_CYCLONE_FIELD
 __device__ void _ModMult(uint64_t *r, uint64_t *a, uint64_t *b) {
 
   uint64_t r512[8];

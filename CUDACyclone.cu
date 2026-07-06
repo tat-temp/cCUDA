@@ -441,14 +441,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     #undef FLUSH_THRESHOLD
 }
 
-extern bool hexToLE64(const std::string& h_in, uint64_t w[4]);
-extern bool hexToHash160(const std::string& h, uint8_t hash160[20]);
-extern std::string formatHex256(const uint64_t limbs[4]);
-extern long double ld_from_u256(const uint64_t v[4]);
-extern bool decode_p2pkh_address(const std::string& addr, uint8_t out20[20]);
-extern std::string formatCompressedPubHex(const uint64_t X[4], const uint64_t Y[4]);
-__global__ void scalarMulKernelBase(const uint64_t* scalars_in, uint64_t* outX, uint64_t* outY, int N);
-
+// hexToLE64/hexToHash160/formatHex256/ld_from_u256 come from CUDAUtils.h,
+// decode_p2pkh_address from sha256.h, formatCompressedPubHex from CUDAUtils.h, and
+// scalarMulKernelBase from CUDAMath.h/CUDAStructures.h -- all included above, so the
+// former local re-declarations here were redundant.
 int main(int argc, char** argv) {
     std::signal(SIGINT, handle_sigint);
 
