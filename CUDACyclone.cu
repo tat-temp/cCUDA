@@ -29,35 +29,20 @@
 static volatile sig_atomic_t g_sigint = 0;
 static void handle_sigint(int) { g_sigint = 1; }
 
-__device__ __forceinline__ int load_found_flag_relaxed(const int* p) {
-    return *((const volatile int*)p);
-}
-__device__ __forceinline__ bool warp_found_ready(const int* __restrict__ d_found_flag,
-                                                 unsigned full_mask,
-                                                 unsigned lane)
-{
-    int f = 0;
-    if (lane == 0) f = load_found_flag_relaxed(d_found_flag);
-    f = __shfl_sync(full_mask, f, 0);
-    return f == FOUND_READY;
-}
-
 #ifndef MAX_BATCH_SIZE
 #define MAX_BATCH_SIZE 1024
 #endif
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
-// Found-flag poll cadence for the hot inner point-add loop. The flag is a terminal,
-// one-shot event (published once via atomicCAS by the finding warp), so polling it on
-// EVERY inner iteration only sheds a volatile L2 load + __shfl_sync per point for no
-// responsiveness we need -- the unconditional per-batch poll (kernel top of the batch
-// loop) already bounds the abort latency. Poll every (MASK+1)-th inner iteration instead.
-// i is warp-uniform (a plain loop counter), so the whole warp polls or skips together and
-// __shfl_sync stays converged. Must be 2^k-1. Override with -DFOUND_POLL_MASK=... to A/B.
-#ifndef FOUND_POLL_MASK
-#define FOUND_POLL_MASK 31u
-#endif
+
+// The kernel does NOT poll the global found-flag inside its hot loops. The finding warp
+// publishes its result via atomicCAS + __threadfence_system + atomicExch(FOUND_READY); the host
+// reads the flag between launches (see the launch loop in main) and stops scheduling further
+// work once it is set. A find is a single terminal event, so the one in-flight launch simply
+// runs to completion -- at most one launch of wasted compute per run. Keeping no in-kernel poll
+// also keeps every launch on its normal per-thread state write-back path (no early-return-
+// before-writeback, the historical prefix-skip hazard).
 
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
@@ -90,7 +75,6 @@ __global__ void kernel_point_add_and_check_oneinv(
 
     const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
     const unsigned full_mask = 0xFFFFFFFFu;
-    if (warp_found_ready(d_found_flag, full_mask, lane)) return;
 
     const uint32_t target_prefix = c_target_words[0];
 
@@ -125,8 +109,6 @@ __global__ void kernel_point_add_and_check_oneinv(
     uint32_t batches_done = 0;
 
     while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
-        if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
-
         {
             uint32_t h5[5];
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
@@ -172,9 +154,6 @@ __global__ void kernel_point_add_and_check_oneinv(
         _ModInv(inverse);
 
         for (int i = 0; i < half - 1; ++i) {
-            if (((unsigned)i & FOUND_POLL_MASK) == 0u &&
-                warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
-
             uint64_t dx_inv_i[4];
             _ModMult(dx_inv_i, subp[i], inverse);
 
@@ -502,6 +481,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Enable mapped (zero-copy) host allocations before the CUDA context is created (this is
+    // the first CUDA call in main). Lets the host poll loop read the found-flag and hash
+    // counter straight from pinned host memory instead of a cudaMemcpy per poll. No-op on the
+    // UVA systems this targets (mapped alloc is always available there); harmless if it fails.
+    (void)cudaSetDeviceFlags(cudaDeviceMapHost);
     int device=0; cudaDeviceProp prop{};
     if (cudaGetDevice(&device)!=cudaSuccess || cudaGetDeviceProperties(&prop, device)!=cudaSuccess) {
         std::cerr<<"CUDA init error\n"; return EXIT_FAILURE;
@@ -603,6 +587,12 @@ int main(int argc, char** argv) {
     uint64_t *d_start_scalars=nullptr, *d_Px=nullptr, *d_Py=nullptr, *d_Rx=nullptr, *d_Ry=nullptr, *d_counts256=nullptr;
     int *d_found_flag=nullptr; FoundResult *d_found_result=nullptr;
     unsigned long long *d_hashes_accum=nullptr; unsigned int *d_any_left=nullptr;
+    // Zero-copy (pinned, mapped) host views of the found-flag and hash counter: the host poll
+    // loop reads *host_found / *h_hashes directly (no cudaMemcpy per poll); the kernel writes
+    // through the matching device pointers (d_found_flag / d_hashes_accum) that
+    // cudaHostGetDevicePointer maps onto the SAME pinned pages.
+    int *host_found=nullptr;
+    unsigned long long *h_hashes=nullptr;
 
     auto ck = [](cudaError_t e, const char* msg){
         if (e != cudaSuccess) {
@@ -617,16 +607,17 @@ int main(int argc, char** argv) {
     ck(cudaMalloc(&d_Rx,           threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Rx)");
     ck(cudaMalloc(&d_Ry,           threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Ry)");
     ck(cudaMalloc(&d_counts256,    threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_counts256)");
-    ck(cudaMalloc(&d_found_flag,   sizeof(int)),                         "cudaMalloc(d_found_flag)");
+    ck(cudaHostAlloc((void**)&host_found, sizeof(int), cudaHostAllocMapped),                   "cudaHostAlloc(host_found)");
+    ck(cudaHostGetDevicePointer((void**)&d_found_flag, host_found, 0),                         "cudaHostGetDevicePointer(found)");
     ck(cudaMalloc(&d_found_result, sizeof(FoundResult)),                 "cudaMalloc(d_found_result)");
-    ck(cudaMalloc(&d_hashes_accum, sizeof(unsigned long long)),          "cudaMalloc(d_hashes_accum)");
+    ck(cudaHostAlloc((void**)&h_hashes, sizeof(unsigned long long), cudaHostAllocMapped),      "cudaHostAlloc(h_hashes)");
+    ck(cudaHostGetDevicePointer((void**)&d_hashes_accum, h_hashes, 0),                         "cudaHostGetDevicePointer(hashes)");
     ck(cudaMalloc(&d_any_left,     sizeof(unsigned int)),                "cudaMalloc(d_any_left)");
 
     ck(cudaMemcpy(d_start_scalars, h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy start_scalars");
     ck(cudaMemcpy(d_counts256,     h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts256");
-    { int zero = FOUND_NONE; unsigned long long zero64=0ull;
-      ck(cudaMemcpy(d_found_flag, &zero,   sizeof(int),                cudaMemcpyHostToDevice), "init found_flag");
-      ck(cudaMemcpy(d_hashes_accum, &zero64, sizeof(unsigned long long), cudaMemcpyHostToDevice), "init hashes_accum"); }
+    *host_found = FOUND_NONE;   // mapped host writes, visible to the kernel launched later
+    *h_hashes   = 0ull;
 
     {
         int blocks_scal = (int)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);
@@ -745,31 +736,28 @@ int main(int argc, char** argv) {
             auto now = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double>(now - tLast).count();
             if (dt >= 1.0) {
-                unsigned long long h_hashes = 0ull;
-                ck(cudaMemcpy(&h_hashes, d_hashes_accum, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "read hashes");
-                double delta = (double)(h_hashes - lastHashes);
+                unsigned long long hashes_now = *(volatile unsigned long long*)h_hashes;  // zero-copy read (no cudaMemcpy)
+                double delta = (double)(hashes_now - lastHashes);
                 double mkeys = delta / (dt * 1e6);
                 double elapsed = std::chrono::duration<double>(now - t0).count();
                 long double total_keys_ld = ld_from_u256(range_len);
-                long double prog = total_keys_ld > 0.0L ? ((long double)h_hashes / total_keys_ld) * 100.0L : 0.0L;
+                long double prog = total_keys_ld > 0.0L ? ((long double)hashes_now / total_keys_ld) * 100.0L : 0.0L;
                 if (prog > 100.0L) prog = 100.0L;
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(1) << mkeys
-                          << " Mkeys/s | Count: " << h_hashes
+                          << " Mkeys/s | Count: " << hashes_now
                           << " | Progress: " << std::fixed << std::setprecision(2) << (double)prog << " %";
                 std::cout.flush();
-                lastHashes = h_hashes; tLast = now;
+                lastHashes = hashes_now; tLast = now;
             }
 
-            int host_found = 0;
-            ck(cudaMemcpy(&host_found, d_found_flag, sizeof(int), cudaMemcpyDeviceToHost), "read found_flag");
-            if (host_found == FOUND_READY) { stop_all = true; break; }
+            if (*(volatile int*)host_found == FOUND_READY) { stop_all = true; break; }
 
             cudaError_t qs = cudaStreamQuery(streamKernel);
             if (qs == cudaSuccess) break;
             else if (qs != cudaErrorNotReady) { cudaGetLastError(); stop_all = true; break; }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         cudaStreamSynchronize(streamKernel);
@@ -788,8 +776,7 @@ int main(int argc, char** argv) {
     cudaDeviceSynchronize();
     std::cout << "\n";
 
-    int h_found_flag = 0;
-    ck(cudaMemcpy(&h_found_flag, d_found_flag, sizeof(int), cudaMemcpyDeviceToHost), "final read found_flag");
+    int h_found_flag = *(volatile int*)host_found;   // zero-copy read (kernel published via __threadfence_system + atomicExch)
 
     int exit_code = EXIT_SUCCESS;
 
@@ -813,7 +800,8 @@ int main(int argc, char** argv) {
     }
 
     cudaFree(d_start_scalars); cudaFree(d_Px); cudaFree(d_Py); cudaFree(d_Rx); cudaFree(d_Ry);
-    cudaFree(d_counts256); cudaFree(d_found_flag); cudaFree(d_found_result); cudaFree(d_hashes_accum); cudaFree(d_any_left);
+    cudaFree(d_counts256); cudaFree(d_found_result); cudaFree(d_any_left);
+    cudaFreeHost(host_found); cudaFreeHost(h_hashes);   // d_found_flag/d_hashes_accum are mapped views, not cudaMalloc'd
     cudaStreamDestroy(streamKernel);
 
     if (h_start_scalars) cudaFreeHost(h_start_scalars);

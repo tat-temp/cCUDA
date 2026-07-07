@@ -18,13 +18,13 @@
 #     just-ran-myself state, so 2nd-slot position no longer confers a bonus (PREWARM=0 = v2)
 #   * run_order (pos 1|2) logged per sample; verdict now reports the ORDER SPLIT and the
 #     decisive perf-first-only stat (a real code win must survive when the treated arm runs 1st)
-# Usage (from repo root on the GPU box):
-#     bash bench_ab.sh                              # default: main vs perf-insn, REPS=5, PREWARM=12
-#     BRANCHES="main perf-insn" bash bench_ab.sh
-#     PREWARM=0 REPS=14 bash bench_ab.sh            # reproduce the old v2 behavior
+# Usage (from repo root on the GPU box) -- name BOTH arms explicitly; there is NO default
+# (a hardcoded branch goes stale the moment it merges/deletes -- that was the perf-insn trap):
+#     BRANCHES="main feature" bash bench_ab.sh
+#     PREWARM=0 REPS=14 BRANCHES="main feature" bash bench_ab.sh   # reproduce the old v2 behavior
 set -uo pipefail
 
-read -ra BRANCHES <<< "${BRANCHES:-main perf-insn}"
+read -ra BRANCHES <<< "${BRANCHES:?name both arms, e.g. BRANCHES='main feature' bash bench_ab.sh}"
 GRID="${GRID:-512,512}"
 RANGE="${RANGE:-100000000000:1FFFFFFFFFFF}"
 TARGET="${TARGET:-000000000000000000000000000000000000dead}"
