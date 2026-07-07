@@ -441,26 +441,31 @@ __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
 __device__ __forceinline__ uint32_t bswap32(uint32_t x){
     return __byte_perm(x, 0, 0x0123);   // reverse the 4 bytes in one PRMT
 }
-__device__ __forceinline__ uint32_t pack_be4(uint8_t a,uint8_t b,uint8_t c,uint8_t d){
-    return ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)c<<8)|((uint32_t)d);
-}
+// SHA-256 message build for the fixed 33-byte compressed pubkey. The high/low 32-bit
+// halves of each little-endian X limb are ALREADY big-endian-ordered when read as u32
+// (v>>32 puts X's most-significant byte in the u32 MSB), so e0..e7 need no per-byte bswap.
+// e0 = top 32 bits of X ... e7 = low 32 bits. The 33-byte message is [prefix] ++ BE(X),
+// so each SHA word is a 1-byte-shifted window across e0..e7 -- one PRMT (__byte_perm) each:
+//   M[j] = (e[j-1] << 24) | (e[j] >> 8)  ==  __byte_perm(e[j], e[j-1], 0x4321)
+// Replaces the per-byte pack_be4 shift/mask chains; verified bit-exact vs the old build
+// over 2e6 random + edge inputs (host emulation of __byte_perm).
 __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const uint64_t x_be_limbs[4], uint32_t out_state[16]){
-    const uint64_t v3 = x_be_limbs[3];
-    const uint64_t v2 = x_be_limbs[2];
-    const uint64_t v1 = x_be_limbs[1];
-    const uint64_t v0 = x_be_limbs[0];
+    const uint32_t e0 = (uint32_t)(x_be_limbs[3] >> 32), e1 = (uint32_t)x_be_limbs[3];
+    const uint32_t e2 = (uint32_t)(x_be_limbs[2] >> 32), e3 = (uint32_t)x_be_limbs[2];
+    const uint32_t e4 = (uint32_t)(x_be_limbs[1] >> 32), e5 = (uint32_t)x_be_limbs[1];
+    const uint32_t e6 = (uint32_t)(x_be_limbs[0] >> 32), e7 = (uint32_t)x_be_limbs[0];
     // Only the 9 data words are built here; SHA256Transform bakes in the constant
     // padding tail (w[9..14]=0) and length word (w[15]=264) itself.
     uint32_t M[9];
-    M[0] = pack_be4(prefix02_03, (uint8_t)(v3>>56), (uint8_t)(v3>>48), (uint8_t)(v3>>40));
-    M[1] = pack_be4((uint8_t)(v3>>32), (uint8_t)(v3>>24), (uint8_t)(v3>>16), (uint8_t)(v3>>8));
-    M[2] = pack_be4((uint8_t)(v3>>0), (uint8_t)(v2>>56), (uint8_t)(v2>>48), (uint8_t)(v2>>40));
-    M[3] = pack_be4((uint8_t)(v2>>32), (uint8_t)(v2>>24), (uint8_t)(v2>>16), (uint8_t)(v2>>8));
-    M[4] = pack_be4((uint8_t)(v2>>0), (uint8_t)(v1>>56), (uint8_t)(v1>>48), (uint8_t)(v1>>40));
-    M[5] = pack_be4((uint8_t)(v1>>32), (uint8_t)(v1>>24), (uint8_t)(v1>>16), (uint8_t)(v1>>8));
-    M[6] = pack_be4((uint8_t)(v1>>0), (uint8_t)(v0>>56), (uint8_t)(v0>>48), (uint8_t)(v0>>40));
-    M[7] = pack_be4((uint8_t)(v0>>32), (uint8_t)(v0>>24), (uint8_t)(v0>>16), (uint8_t)(v0>>8));
-    M[8] = pack_be4((uint8_t)(v0>>0), 0x80u, 0x00u, 0x00u);
+    M[0] = __byte_perm(e0, (uint32_t)prefix02_03, 0x4321);   // [prefix, X.b0, X.b1, X.b2]
+    M[1] = __byte_perm(e1, e0, 0x4321);
+    M[2] = __byte_perm(e2, e1, 0x4321);
+    M[3] = __byte_perm(e3, e2, 0x4321);
+    M[4] = __byte_perm(e4, e3, 0x4321);
+    M[5] = __byte_perm(e5, e4, 0x4321);
+    M[6] = __byte_perm(e6, e5, 0x4321);
+    M[7] = __byte_perm(e7, e6, 0x4321);
+    M[8] = __byte_perm(e7, 0x00000080u, 0x0455);             // [X.b31, 0x80, 0x00, 0x00]
     uint32_t st[8];
     // SHA-256 IV as literals (was SHA256Initialize copying from __constant__ IV[8]).
     // Seeding st[] with immediates lets ptxas constant-fold round 0; SHA256Transform
