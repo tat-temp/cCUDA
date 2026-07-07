@@ -9,20 +9,7 @@ SM_ARCHS   := 75 86 89 $(GPU_ARCH)
 GENCODE    := $(foreach arch,$(SM_ARCHS),-gencode arch=compute_$(arch),code=sm_$(arch))
 NATIVE_GENCODE := -gencode arch=compute_$(GPU_ARCH),code=sm_$(GPU_ARCH)
 
-# --- A/B EXPERIMENT TOGGLE (f1 branch only; delete when the A/B concludes) --------------
-# f1 builds the HOST_ONLY_FOUND_STOP treatment, so a plain `make` -- and therefore both
-# bench_ab.sh's per-branch build AND proof.py -- exercises the flag-ON kernel (in-kernel
-# found-flag polls removed; host stops scheduling between launches). main carries no such
-# flag and is the baseline arm. If it wins, bake the behavior into the source and delete
-# this; if it loses, it dies with the branch. See the HOST_ONLY_FOUND_STOP note in
-# CUDACyclone.cu.
-# NOTE: f1 ALSO moves the found-flag + hash counter to zero-copy (mapped) host memory
-# unconditionally. That is only coherent with polls REMOVED -- so the baseline arm is
-# `main`, NOT `make AB_FLAGS=` on f1 (that rebuilds the in-kernel polls but leaves the flag
-# in mapped memory, so every poll becomes a PCIe read: pathologically slow, not a baseline).
-AB_FLAGS   ?= -DHOST_ONLY_FOUND_STOP
-
-NVCC_FLAGS := -O3 -rdc=true -use_fast_math --ptxas-options=-O3 $(GENCODE) $(AB_FLAGS)
+NVCC_FLAGS := -O3 -rdc=true -use_fast_math --ptxas-options=-O3 $(GENCODE)
 CXXFLAGS   := -std=c++17
 
 LDFLAGS    := -lcudadevrt -cudart=static
@@ -48,7 +35,7 @@ $(TARGET): $(OBJ)
 # Verbose ptxas resource report (registers/thread, spill stores/loads, stack frame) printed
 # during a native-arch build for every kernel + non-inlined device function.
 ptxinfo: $(SRC) $(HDRS)
-	$(CC) -O3 -rdc=true -use_fast_math --ptxas-options=-O3 $(NATIVE_GENCODE) $(CXXFLAGS) $(AB_FLAGS) \
+	$(CC) -O3 -rdc=true -use_fast_math --ptxas-options=-O3 $(NATIVE_GENCODE) $(CXXFLAGS) \
 	      -Xptxas -v $(SRC) -o CUDACyclone-ptxinfo $(LDFLAGS)
 	@rm -f CUDACyclone-ptxinfo
 

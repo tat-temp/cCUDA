@@ -149,7 +149,7 @@ static RunResult run_search(const Config& cfg) {
             for (u64 t = w0; t < w1; ++t) { pt.push_back(in[t]); S.push_back(Sarr[t]); gid.push_back(t); }
             u64 rem = remarr[w0];  // rem is homogeneous within a warp (invariant, held even after desync)
 
-            if (R.found) continue;                         // warp_found_ready -> return (:120)
+            if (R.found) continue;                         // (historical) old in-kernel found-poll early-return; the kernel now stops via the host between launches
             if (rem == 0) {                                // rem==0 fast path (:111-115)
                 for (size_t l = 0; l < gid.size(); ++l) out[gid[l]] = pt[l];
                 continue;
