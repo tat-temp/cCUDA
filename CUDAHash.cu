@@ -15,14 +15,11 @@ __device__ __forceinline__ uint32_t ror32(uint32_t x, int n)
 #endif
 }
 
-// a ^ b ^ c folded into one LOP3 (truth table 0x96). ptxas usually does this anyway;
-// writing it explicitly guarantees the single instruction.
+// a ^ b ^ c. Left to ptxas as plain C: it folds this to one LOP3 (0x96) AND is free to
+// fuse it across op boundaries (the RIPEMD-160 f-function audit proved forced lop3.b32
+// asm BLOCKS that fusion, costing +2 LOP3). Inverse-test: does unpinning SHA help too?
 __device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
-#if __CUDA_ARCH__ >= 500
-    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r;
-#else
     return a ^ b ^ c;
-#endif
 }
 
 __device__ __forceinline__ uint32_t bigS0(uint32_t x) { return xor3(ror32(x, 2), ror32(x, 13), ror32(x, 22)); }
@@ -30,20 +27,13 @@ __device__ __forceinline__ uint32_t bigS1(uint32_t x) { return xor3(ror32(x, 6),
 __device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
 __device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
 
-// Ch = (x&y)^(~x&z)  -> LOP3 truth table 0xCA;  Maj = (x&y)|(x&z)|(y&z) -> 0xE8. One instruction each.
+// Ch = (x&y)^(~x&z) -> LOP3 0xCA;  Maj = (x&y)|(x&z)|(y&z) -> 0xE8. Plain C: ptxas folds
+// each to one LOP3 and may fuse across boundaries (see xor3 note / RIPEMD f-function audit).
 __device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){
-#if __CUDA_ARCH__ >= 500
-    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
-#else
     return (x & y) ^ (~x & z);
-#endif
 }
 __device__ __forceinline__ uint32_t Maj(uint32_t x,uint32_t y,uint32_t z){
-#if __CUDA_ARCH__ >= 500
-    uint32_t r; asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z)); return r;
-#else
     return (x & y) | (x & z) | (y & z);
-#endif
 }
 
 // SHA-256 round constants. `static constexpr` makes every K[t] (all indices are
