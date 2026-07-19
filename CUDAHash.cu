@@ -494,11 +494,14 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     RIPEMD160Transform(out5, sha_state_le);
 }
 
-__device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
-                                                      const uint64_t x_be_limbs[4],
-                                                      uint32_t out5[5])
+// BY-VALUE ABI (x in by value, hash160 out by value) -- see CUDAHash.cuh for the measured effect
+// and why this must not be reverted to pointers. __noinline__ is deliberate: the CALL is kept,
+// only its ABI changed. The body is unchanged from the pointer version, so the hash is bit-exact.
+__device__ __noinline__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x)
 {
     uint32_t sha_state[16];
-    SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
-    RIPEMD160_from_SHA256_state(sha_state, out5);
+    SHA256_33_from_limbs(prefix02_03, x.v, sha_state);   // x arrives in regs; callee is forceinline
+    H160 h;
+    RIPEMD160_from_SHA256_state(sha_state, h.w);         // forceinline -> SROA keeps h.w in regs
+    return h;
 }
