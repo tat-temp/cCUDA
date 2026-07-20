@@ -22,7 +22,14 @@
 
 #include "CUDAMath.h"
 #include "sha256.h"
-#include "CUDAHash.cuh"
+// P3.0 (single-TU + rdc=false): pull the getHash160 DEFINITION into this TU rather than the
+// CUDAHash.cuh declaration. getHash160_33_from_limbs is the ONLY __noinline__ device fn in
+// CUDAHash.cu (every helper there is __forceinline__ and inlines into it), so it was the sole
+// cross-TU device call and the sole reason this build needed -rdc=true. In one TU with rdc=false
+// ptxas emits an INTRA-MODULE CALL.REL with a custom register ABI in place of the cross-TU
+// CALL.ABS.NOINC, which is pinned to the conservative stack-heavy ABI-stable convention.
+// CUDAHash.cu is dropped from Makefile SRC so it is not also compiled standalone.
+#include "CUDAHash.cu"
 #include "CUDAUtils.h"
 #include "CUDAStructures.h"
 
@@ -110,12 +117,11 @@ __global__ void kernel_point_add_and_check_oneinv(
 
     while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
         {
-            uint32_t h5[5];
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-            getHash160_33_from_limbs(prefix, x1, h5);
-            bool pref = hash160_prefix_equals(h5, target_prefix);
+            H160 h5 = getHash160_33_from_limbs(prefix, u256_of(x1));   // by-value ABI: h5 stays in regs
+            bool pref = hash160_prefix_equals(h5.w, target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5, c_target_words);
+                bool full = pref && hash160_matches_full(h5.w, c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         d_found_result->scalar[0]=S[0]; d_found_result->scalar[1]=S[1]; d_found_result->scalar[2]=S[2]; d_found_result->scalar[3]=S[3];
@@ -173,10 +179,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
-                bool pref = hash160_prefix_equals(h5, target_prefix);
+                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = hash160_prefix_equals(h5.w, target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5, c_target_words);
+                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -217,10 +223,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
-                bool pref = hash160_prefix_equals(h5, target_prefix);
+                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = hash160_prefix_equals(h5.w, target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5, c_target_words);
+                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -270,10 +276,10 @@ __global__ void kernel_point_add_and_check_oneinv(
             _ModMult(s, s, lam);
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-            uint32_t h5[5]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h5);
-            bool pref = hash160_prefix_equals(h5, target_prefix);
+            H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
+            bool pref = hash160_prefix_equals(h5.w, target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5, c_target_words);
+                bool full = pref && hash160_matches_full(h5.w, c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
