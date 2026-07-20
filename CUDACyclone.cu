@@ -137,7 +137,22 @@ __global__ void kernel_point_add_and_check_oneinv(
             }
         }
 
-        uint64_t subp[MAX_BATCH_SIZE/2][4];
+        // 16-byte aligned so ptxas can fold the per-row traffic into 128-bit LDL/STL instead of
+        // 64-bit pairs. Each row is 4 x u64 = 32 B, so a 16 B-aligned base makes EVERY row start
+        // 16 B-aligned (base + 32*i), which makes subp[i][0..1] and subp[i][2..3] each a legal
+        // 128-bit access. Without this the natural alignment is only 8 B: if the base lands at
+        // 8 mod 16 then every row does too, and ptxas must emit scalar 64-bit ops.
+        //
+        // This array is the kernel's whole 16 KB stack frame and the dominant remaining source of
+        // local-memory traffic -- the one lever left after PR#15 cleared the addressability
+        // spills. Halving its op count is a power-density win, which on a 600 W-capped part is
+        // expected to show up as CLOCK rather than keys/cycle (endogenous-clock thesis).
+        //
+        // GATE THIS: vectorizing needs aligned register PAIRS, which can raise pressure, and the
+        // kernel sits at 124 of 128 registers. `make gate` fails on a spill or a ceiling breach.
+        // Then confirm the intent actually landed by counting LDL.128/STL.128 vs LDL.64/STL.64
+        // in `make sass` -- alignment PERMITS vectorization, it does not force it.
+        __align__(16) uint64_t subp[MAX_BATCH_SIZE/2][4];
         uint64_t acc[4], tmp[4];
 
         acc[0] = c_Jx[0]; acc[1] = c_Jx[1]; acc[2] = c_Jx[2]; acc[3] = c_Jx[3];
