@@ -711,34 +711,120 @@ int main(int argc, char** argv) {
     (void)cudaFuncSetCacheConfig(kernel_point_add_and_check_oneinv, cudaFuncCachePreferL1);
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto tLast = t0;
-    unsigned long long lastHashes = 0ull;
 
-    bool stop_all = false;
-    bool completed_all = false;
-    while (!stop_all) {
-        if (g_sigint) std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
+    // ---- Host thread split ---------------------------------------------------------------
+    // TWO threads of execution, with one hard ownership rule:
+    //   * tWorker (spawned) owns EVERY CUDA call for the duration of the search, plus the
+    //     d_Px/d_Rx ping-pong buffers.
+    //   * main (this thread) owns SIGINT translation and stdout, and makes NO CUDA call
+    //     between the spawn and the join.
+    // That rule is what makes teardown provably safe: join() returns only after the worker
+    // lambda has returned, so no CUDA call can be in flight or issued afterwards, and it
+    // supplies the happens-before that publishes worker_cuda_err / launch_error /
+    // completed_all and the mapped-page writes to main.
+    //
+    // Why main is the Ctrl+C listener rather than a third spawned thread: a signal handler may
+    // not safely do anything but assign to a volatile sig_atomic_t, so "listening" for Ctrl+C
+    // is necessarily polling a flag the handler wrote. A thread whose only job is that poll,
+    // while main blocks in join(), buys nothing over main doing it directly. Keeping the
+    // progress print on that same thread also makes it impossible for the Ctrl+C banner and
+    // the \r progress line to interleave and corrupt each other.
+    std::atomic<bool> g_stop{false};
+    std::atomic<bool> completed_all{false};
+    std::atomic<bool> launch_error{false};
+    cudaError_t worker_cuda_err = cudaSuccess;   // plain; published to main by tWorker.join()
+    static_assert(std::atomic<bool>::is_always_lock_free, "g_stop must be lock-free");
 
-        unsigned int zeroU = 0u;
-        ck(cudaMemcpyAsync(d_any_left, &zeroU, sizeof(unsigned int), cudaMemcpyHostToDevice, streamKernel), "zero d_any_left");
+    // NOTE: ck() calls std::exit() and MUST NOT be used inside tWorker -- std::exit from a
+    // spawned thread runs atexit handlers and static destructors, tearing down the statically
+    // linked CUDA runtime while main is still live. Every in-loop CUDA call below therefore
+    // captures its error into worker_cuda_err instead of exiting. ck() stays correct for the
+    // setup calls above, which all run on main before any thread exists.
+    auto worker = [&]() {
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            unsigned int zeroU = 0u;
+            cudaError_t e = cudaMemcpyAsync(d_any_left, &zeroU, sizeof(unsigned int), cudaMemcpyHostToDevice, streamKernel);
+            if (e != cudaSuccess) { worker_cuda_err = e; launch_error.store(true); break; }
 
-        kernel_point_add_and_check_oneinv<<<blocks, threadsPerBlock, 0, streamKernel>>>(
-            d_Px, d_Py, d_Rx, d_Ry,
-            d_start_scalars, d_counts256,
-            threadsTotal,
-            B,
-            slices_per_launch,
-            d_found_flag, d_found_result,
-            d_hashes_accum,
-            d_any_left
-        );
-        cudaError_t launchErr = cudaGetLastError();
-        if (launchErr != cudaSuccess) {
-            std::cerr << "\nKernel launch error: " << cudaGetErrorString(launchErr) << "\n";
-            stop_all = true;
+            kernel_point_add_and_check_oneinv<<<blocks, threadsPerBlock, 0, streamKernel>>>(
+                d_Px, d_Py, d_Rx, d_Ry,
+                d_start_scalars, d_counts256,
+                threadsTotal,
+                B,
+                slices_per_launch,
+                d_found_flag, d_found_result,
+                d_hashes_accum,
+                d_any_left
+            );
+            cudaError_t launchErr = cudaGetLastError();
+            if (launchErr != cudaSuccess) { worker_cuda_err = launchErr; launch_error.store(true); break; }
+
+            // Wait shape kept BYTE-FOR-BYTE as it was pre-split (query + 1 ms sleep, then the
+            // stream sync). This commit moves WHERE code runs, never HOW it waits -- swapping in
+            // a bare blocking cudaStreamSynchronize would change host busy-state and the
+            // resulting package-power shift would be misread as a threading effect.
+            bool found_now = false;
+            while (true) {
+                if (*(volatile int*)host_found == FOUND_READY) { found_now = true; break; }
+
+                cudaError_t qs = cudaStreamQuery(streamKernel);
+                if (qs == cudaSuccess) break;
+                if (qs != cudaErrorNotReady) {
+                    worker_cuda_err = qs; (void)cudaGetLastError();
+                    launch_error.store(true); found_now = true; break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            cudaError_t se = cudaStreamSynchronize(streamKernel);
+            if (se != cudaSuccess) { worker_cuda_err = se; launch_error.store(true); break; }
+
+            // Stop BEFORE the swap. One swap per COMPLETED launch is what keeps each thread's
+            // point in lockstep with its scalar; breaking out after a swap is the exact shape of
+            // the historical prefix-collision key-skip bug (fixed in PR#5).
+            //
+            // This tests g_stop and deliberately NOT g_sigint. Ctrl+C therefore reaches the
+            // worker only via main's 50 ms poll, i.e. up to 50 ms late. At the default
+            // slices_per_launch a launch is multi-second, so that is invisible; with a very
+            // small slice count a couple of extra launches may complete before the stop lands
+            // (harmless -- parity holds on each, so no key range is skipped). Reading g_sigint
+            // here would shave that latency but would let the worker set g_stop and exit before
+            // main's loop had a chance to print the interrupt banner, which is the silent-exit
+            // defect this design exists to avoid. Latency is the cheaper cost.
+            if (found_now || g_stop.load(std::memory_order_relaxed)) break;
+
+            unsigned int h_any = 0u;
+            cudaError_t e2 = cudaMemcpy(&h_any, d_any_left, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+            if (e2 != cudaSuccess) { worker_cuda_err = e2; launch_error.store(true); break; }
+
+            std::swap(d_Px, d_Rx);
+            std::swap(d_Py, d_Ry);
+
+            if (h_any == 0u) { completed_all.store(true); break; }
         }
+        g_stop.store(true);   // wake main out of its poll loop on EVERY exit path
+    };
 
-        while (!stop_all) {
+    std::thread tWorker(worker);
+
+    // main: SIGINT listener + reporter. Deliberately contains no CUDA call.
+    {
+        auto tLast = t0;
+        unsigned long long lastHashes = 0ull;
+        const long double total_keys_ld = ld_from_u256(range_len);   // hoisted out of the print
+        bool announced_sigint = false;
+
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            // Sole g_sigint -> g_stop translation point in the program. Keeping it here (rather
+            // than also testing g_sigint in the worker) is what guarantees the banner prints
+            // exactly once: the worker cannot race ahead and stop the search silently.
+            if (g_sigint && !announced_sigint) {
+                announced_sigint = true;
+                std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
+                g_stop.store(true);
+            }
+
             auto now = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double>(now - tLast).count();
             if (dt >= 1.0) {
@@ -746,7 +832,6 @@ int main(int argc, char** argv) {
                 double delta = (double)(hashes_now - lastHashes);
                 double mkeys = delta / (dt * 1e6);
                 double elapsed = std::chrono::duration<double>(now - t0).count();
-                long double total_keys_ld = ld_from_u256(range_len);
                 long double prog = total_keys_ld > 0.0L ? ((long double)hashes_now / total_keys_ld) * 100.0L : 0.0L;
                 if (prog > 100.0L) prog = 100.0L;
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << elapsed
@@ -757,28 +842,15 @@ int main(int argc, char** argv) {
                 lastHashes = hashes_now; tLast = now;
             }
 
-            if (*(volatile int*)host_found == FOUND_READY) { stop_all = true; break; }
-
-            cudaError_t qs = cudaStreamQuery(streamKernel);
-            if (qs == cudaSuccess) break;
-            else if (qs != cudaErrorNotReady) { cudaGetLastError(); stop_all = true; break; }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-
-        cudaStreamSynchronize(streamKernel);
         std::cout.flush();
-        if (stop_all || g_sigint) break;
-
-        unsigned int h_any = 0u;
-        ck(cudaMemcpy(&h_any, d_any_left, sizeof(unsigned int), cudaMemcpyDeviceToHost), "read any_left");
-
-        std::swap(d_Px, d_Rx);
-        std::swap(d_Py, d_Ry);
-
-        if (h_any == 0u) { completed_all = true; break; }
     }
 
+    tWorker.join();
+
+    // MUST stay after the join. The worker's error-exit paths break out WITHOUT a stream sync,
+    // so device work may still be queued; this is what drains it before the frees below.
     cudaDeviceSynchronize();
     std::cout << "\n";
 
@@ -786,23 +858,30 @@ int main(int argc, char** argv) {
 
     int exit_code = EXIT_SUCCESS;
 
+    // Precedence: found > cuda-error > Ctrl+C > exhausted > terminated.
+    // The launch_error branch is NEW and fixes a real bug that predates this refactor: a kernel
+    // launch failure (or a cudaStreamQuery error) used to print at most a message, break the
+    // loop, and fall through to "TERMINATED" with exit_code still EXIT_SUCCESS -- i.e. a CUDA
+    // failure returned 0 and any script driving this binary saw a clean run.
     if (h_found_flag == FOUND_READY) {
         FoundResult host_result{};
         ck(cudaMemcpy(&host_result, d_found_result, sizeof(FoundResult), cudaMemcpyDeviceToHost), "read found_result");
         std::cout << "\n======== FOUND MATCH! =================================\n";
         std::cout << "Private Key   : " << formatHex256(host_result.scalar) << "\n";
         std::cout << "Public Key    : " << formatCompressedPubHex(host_result.Rx, host_result.Ry) << "\n";
+    } else if (launch_error.load()) {
+        std::cerr << "======== CUDA ERROR ===================================\n";
+        std::cerr << "Search aborted by a CUDA error: " << cudaGetErrorString(worker_cuda_err) << "\n";
+        exit_code = EXIT_FAILURE;
+    } else if (g_sigint) {
+        std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
+        std::cout << "Search was interrupted by user. Partial progress above.\n";
+        exit_code = 130;
+    } else if (completed_all.load()) {
+        std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
+        std::cout << "Target hash160 was not found within the specified range.\n";
     } else {
-        if (g_sigint) {
-            std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
-            std::cout << "Search was interrupted by user. Partial progress above.\n";
-            exit_code = 130;
-        } else if (completed_all) {
-            std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
-            std::cout << "Target hash160 was not found within the specified range.\n";
-        } else {
-            std::cout << "======== TERMINATED ===================================\n";
-        }
+        std::cout << "======== TERMINATED ===================================\n";
     }
 
     cudaFree(d_start_scalars); cudaFree(d_Px); cudaFree(d_Py); cudaFree(d_Rx); cudaFree(d_Ry);

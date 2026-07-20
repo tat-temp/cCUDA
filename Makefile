@@ -42,9 +42,13 @@ NATIVE_GENCODE := -gencode arch=compute_$(GPU_ARCH),code=sm_$(GPU_ARCH)
 # still-__noinline__ getHash160. -lcudadevrt goes with it: the device runtime is only required
 # for rdc device linking (no dynamic parallelism / device-side launch in this code).
 NVCC_FLAGS := -O3 -use_fast_math --ptxas-options=-O3 $(GENCODE)
-CXXFLAGS   := -std=c++17
+# -pthread is required now that the host side spawns a std::thread (worker/reporter split).
+# On glibc >= 2.34 libpthread is folded into libc and this is a no-op; below that, omitting it
+# fails at link or throws std::system_error on first thread construction. Host-side only --
+# it does not affect device codegen, so `make gate` numbers are unchanged by it.
+CXXFLAGS   := -std=c++17 -Xcompiler -pthread
 
-LDFLAGS    := -cudart=static
+LDFLAGS    := -cudart=static -Xcompiler -pthread
 
 .PHONY: all clean ptxinfo gate sass resusage
 
