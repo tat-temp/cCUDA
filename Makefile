@@ -7,8 +7,31 @@ OBJ         := $(SRC:.cu=.o)
 HDRS        := $(wildcard *.h *.cuh)
 CC          := nvcc
 
-GPU_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | tr -d '.')
-SM_ARCHS   := 75 86 89 $(GPU_ARCH)
+# Native arch, auto-detected. `?=` so it can be set explicitly on a box where nvidia-smi is
+# absent or not on PATH:  make GPU_ARCH=120
+GPU_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '.')
+
+# HARD FAIL on an undetected GPU_ARCH rather than building something subtly wrong.
+# WITHOUT this guard the failure mode is backwards: an empty GPU_ARCH degrades SM_ARCHS to
+# the still-VALID list "75 86 89", so `make all` SUCCEEDS and ships a binary with no cubin
+# for the arch it will actually run on -- which then falls back to slow PTX JIT at load --
+# while `make ptxinfo`/`gate` fail loudly on a malformed "-gencode arch=compute_,code=sm_".
+# i.e. the thing that ships wrong succeeds and the diagnostic errors. Guarded so targets
+# that need no compiler still work on a GPU-less box.
+NOARCH_OK := clean
+ifneq ($(filter-out $(NOARCH_OK),$(or $(MAKECMDGOALS),all)),)
+  ifeq ($(strip $(GPU_ARCH)),)
+    $(error could not detect GPU compute capability (nvidia-smi missing, off PATH, or returned nothing). Pass it explicitly: make GPU_ARCH=120)
+  endif
+endif
+
+# Dedupe the native arch against the baked-in list: on an sm_75/86/89 box the naive
+# "75 86 89 $(GPU_ARCH)" yields a DUPLICATE -gencode, which nvcc rejects outright.
+# filter-out is used rather than $(sort) deliberately -- $(sort) would also REORDER the
+# list lexicographically ("120 75 86 89"), whereas this appends only when needed and so
+# emits a byte-identical command line to the previous Makefile on any non-{75,86,89} GPU.
+BASE_ARCHS := 75 86 89
+SM_ARCHS   := $(strip $(BASE_ARCHS) $(filter-out $(BASE_ARCHS),$(GPU_ARCH)))
 GENCODE    := $(foreach arch,$(SM_ARCHS),-gencode arch=compute_$(arch),code=sm_$(arch))
 NATIVE_GENCODE := -gencode arch=compute_$(GPU_ARCH),code=sm_$(GPU_ARCH)
 
