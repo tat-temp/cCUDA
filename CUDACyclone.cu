@@ -685,22 +685,27 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     // ---- Host thread split ---------------------------------------------------------------
-    // TWO threads of execution, with one hard ownership rule:
-    //   * tWorker (spawned) owns EVERY CUDA call for the duration of the search, plus the
+    // THREE threads of execution, with one hard ownership rule:
+    //   * tWorker   (spawned) owns EVERY CUDA call for the duration of the search, plus the
     //     d_Px/d_Rx ping-pong buffers.
-    //   * main (this thread) owns SIGINT translation and stdout, and makes NO CUDA call
-    //     between the spawn and the join.
-    // That rule is what makes teardown provably safe: join() returns only after the worker
+    //   * tListener (spawned) owns SIGINT translation and stdout, and makes NO CUDA call.
+    //   * main blocks in the joins and touches neither stdout nor CUDA until both are gone.
+    // That rule is what makes teardown provably safe: join() returns only after the thread's
     // lambda has returned, so no CUDA call can be in flight or issued afterwards, and it
     // supplies the happens-before that publishes worker_cuda_err / launch_error /
     // completed_all and the mapped-page writes to main.
     //
-    // Why main is the Ctrl+C listener rather than a third spawned thread: a signal handler may
-    // not safely do anything but assign to a volatile sig_atomic_t, so "listening" for Ctrl+C
-    // is necessarily polling a flag the handler wrote. A thread whose only job is that poll,
-    // while main blocks in join(), buys nothing over main doing it directly. Keeping the
-    // progress print on that same thread also makes it impossible for the Ctrl+C banner and
-    // the \r progress line to interleave and corrupt each other.
+    // stdout stays single-owner throughout: tListener alone prints between the spawns and the
+    // joins, so the Ctrl+C banner and the \r progress line cannot interleave and corrupt each
+    // other. main resumes printing only after tListener.join().
+    //
+    // The listener polls at 1 ms. A signal handler may not safely do anything but assign to a
+    // volatile sig_atomic_t, so "listening" for Ctrl+C is necessarily polling the flag the
+    // handler wrote, and this interval is what bounds how long the user waits to SEE the banner.
+    // It does NOT bound how long the search takes to STOP: the worker tests g_stop only at slice
+    // boundaries (multi-second at the default slices_per_launch), so the poll governs feedback
+    // latency, not shutdown latency. The progress line is gated on its own 1 s elapsed check, so
+    // raising the poll rate does not change how much this thread prints.
     std::atomic<bool> g_stop{false};
     std::atomic<bool> completed_all{false};
     std::atomic<bool> launch_error{false};
@@ -757,13 +762,13 @@ int main(int argc, char** argv) {
             // the historical prefix-collision key-skip bug (fixed in PR#5).
             //
             // This tests g_stop and deliberately NOT g_sigint. Ctrl+C therefore reaches the
-            // worker only via main's 50 ms poll, i.e. up to 50 ms late. At the default
+            // worker only via tListener's 1 ms poll, i.e. up to 1 ms late. At the default
             // slices_per_launch a launch is multi-second, so that is invisible; with a very
-            // small slice count a couple of extra launches may complete before the stop lands
-            // (harmless -- parity holds on each, so no key range is skipped). Reading g_sigint
-            // here would shave that latency but would let the worker set g_stop and exit before
-            // main's loop had a chance to print the interrupt banner, which is the silent-exit
-            // defect this design exists to avoid. Latency is the cheaper cost.
+            // small slice count an extra launch may complete before the stop lands (harmless --
+            // parity holds on each, so no key range is skipped). Reading g_sigint here would
+            // erase even that, but would let the worker set g_stop and exit before tListener had
+            // a chance to print the interrupt banner, which is the silent-exit defect this
+            // design exists to avoid. Latency is the cheaper cost.
             if (found_now || g_stop.load(std::memory_order_relaxed)) break;
 
             unsigned int h_any = 0u;
@@ -775,13 +780,11 @@ int main(int argc, char** argv) {
 
             if (h_any == 0u) { completed_all.store(true); break; }
         }
-        g_stop.store(true);   // wake main out of its poll loop on EVERY exit path
+        g_stop.store(true);   // wake tListener out of its poll loop on EVERY exit path
     };
 
-    std::thread tWorker(worker);
-
-    // main: SIGINT listener + reporter. Deliberately contains no CUDA call.
-    {
+    // tListener: SIGINT listener + reporter. Deliberately contains no CUDA call.
+    auto listener = [&]() {
         auto tLast = t0;
         unsigned long long lastHashes = 0ull;
         const long double total_keys_ld = ld_from_u256(range_len);   // hoisted out of the print
@@ -814,12 +817,20 @@ int main(int argc, char** argv) {
                 lastHashes = hashes_now; tLast = now;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         std::cout.flush();
-    }
+    };
 
+    std::thread tWorker(worker);
+    std::thread tListener(listener);
+
+    // tWorker first: it is the thread that sets g_stop on every exit path, so tListener is
+    // guaranteed to be within one 1 ms poll of returning by the time this join lands. Joining
+    // in the other order would work too, but this way main is never blocked behind the thread
+    // that only prints.
     tWorker.join();
+    tListener.join();
 
     // MUST stay after the join. The worker's error-exit paths break out WITHOUT a stream sync,
     // so device work may still be queued; this is what drains it before the frees below.
