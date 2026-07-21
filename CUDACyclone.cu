@@ -43,18 +43,65 @@ static void handle_sigint(int) { g_sigint = 1; }
 #define WARP_SIZE 32
 #endif
 
-// The kernel does NOT poll the global found-flag inside its hot loops. The finding warp
+// The kernel does NOT poll the global found-flag inside its hot loops. The finding thread
 // publishes its result via atomicCAS + __threadfence_system + atomicExch(FOUND_READY); the host
 // reads the flag between launches (see the launch loop in main) and stops scheduling further
 // work once it is set. A find is a single terminal event, so the one in-flight launch simply
-// runs to completion -- at most one launch of wasted compute per run. Keeping no in-kernel poll
-// also keeps every launch on its normal per-thread state write-back path (no early-return-
-// before-writeback, the historical prefix-skip hazard).
+// runs to completion -- at most one launch of wasted compute per run.
+//
+// THERE IS NOW NO EARLY RETURN ANYWHERE IN THIS KERNEL. Every thread reaches the per-thread state
+// write-back at the bottom on every launch. This sentence used to be aspirational: PR#12 removed
+// the in-kernel polls but left four `if (__any_sync(...full)) { ...; return; }` sites in the found
+// path, which were the last constructs able to express the historical prefix-skip bug (a warp
+// returning before the write-back, desyncing its point from its scalar and silently abandoning a
+// tail of its range). Those are gone, so the hazard is now structurally unrepresentable rather
+// than merely gated behind the full-hash160 test.
+//
+// Keep it that way. Re-adding a return here would ALSO break warp uniformity, which the remaining
+// warp-collectives depend on: WARP_FLUSH_HASHES expands to a warp_reduce_add_ull with a hardcoded
+// full mask, so a lone diverged lane calling it is UB -- concretely a stall, or a silently short
+// hash count (the reduce lands the total in lane 0, and the atomicAdd is gated on lane == 0).
+// Uniformity comes from launch geometry (every thread gets an identical per_thread_cnt, an exact
+// multiple of B), never from the votes that used to be here.
 
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Jx[4];
 __constant__ uint64_t c_Jy[4];
+
+// Cold found-record, called by at most the ~2^-32 winning thread. __noinline__ so the atomicCAS +
+// publish sequence lives out-of-line instead of being inlined into the hot kernel four times
+// (centre / +iG / -iG / last point). It records raw state only -- the host assembles the key as
+// scalar + offset and re-derives the pubkey.
+//
+// ARGS ARE BY VALUE, DELIBERATELY. This is NOT a literal port of the f1-all3 signature, which
+// takes `const uint64_t* S`. That is free THERE because its S is a global pointer that never lives
+// in registers; here S is a four-limb REGISTER array mutated by the carry chain every batch, and
+// taking its address for a __noinline__ callee would make it address-taken and force a
+// local-memory home -- putting LDL/STL onto the hot per-batch carry chain. That is exactly the
+// refuted "nisub" failure mode (a __noinline__ pointer-arg field op cost an 864-byte call-ABI
+// frame), and the inverse of the by-value ABI that won PR#15 +5.784%. u256_of() is
+// __forceinline__, so the pack is register moves and S's address never escapes -- the same
+// mechanism already proven on getHash160_33_from_limbs(prefix, u256_of(x1)) in this kernel.
+//
+// Contains NO warp-collective op (only atomicCAS / plain stores / threadfence / atomicExch), which
+// is what makes it legal to call from divergent control flow after the __any_sync votes are gone.
+// Keep it that way.
+__device__ __noinline__ void record_found(
+    int* __restrict__ d_found_flag,
+    FoundResult* __restrict__ d_found_result,
+    U256 s, int32_t offset)
+{
+    if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
+        d_found_result->scalar[0] = s.v[0];
+        d_found_result->scalar[1] = s.v[1];
+        d_found_result->scalar[2] = s.v[2];
+        d_found_result->scalar[3] = s.v[3];
+        d_found_result->offset    = offset;
+        __threadfence_system();
+        atomicExch(d_found_flag, FOUND_READY);
+    }
+}
 
 __launch_bounds__(256, 2)
 __global__ void kernel_point_add_and_check_oneinv(
@@ -80,8 +127,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= threadsTotal) return;
 
-    const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-    const unsigned full_mask = 0xFFFFFFFFu;
+    const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));   // still needed by WARP_FLUSH_HASHES
 
     const uint32_t target_prefix = c_target_words[0];
 
@@ -119,22 +165,12 @@ __global__ void kernel_point_add_and_check_oneinv(
         {
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             H160 h5 = getHash160_33_from_limbs(prefix, u256_of(x1));   // by-value ABI: h5 stays in regs
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
-            if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
-                if (full) {
-                    if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                        d_found_result->scalar[0]=S[0]; d_found_result->scalar[1]=S[1]; d_found_result->scalar[2]=S[2]; d_found_result->scalar[3]=S[3];
-                        d_found_result->Rx[0]=x1[0]; d_found_result->Rx[1]=x1[1]; d_found_result->Rx[2]=x1[2]; d_found_result->Rx[3]=x1[3];
-                        d_found_result->Ry[0]=y1[0]; d_found_result->Ry[1]=y1[1]; d_found_result->Ry[2]=y1[2]; d_found_result->Ry[3]=y1[3];
-                        __threadfence_system();
-                        atomicExch(d_found_flag, FOUND_READY);
-                    }
-                }
-                // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                // collision must keep scanning, else the skipped write-back drops keys.
-                if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
-            }
+            // Per-thread compare, no warp vote. The old __any_sync gate ran a VOTE on EVERY point
+            // for a ~2^-32 event; a plain per-thread test is cheaper and, with the early return
+            // gone, needs no warp uniformity. See the note at the write-back for why not returning
+            // is the correctness-forced choice, not merely the simpler one.
+            if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
+                record_found(d_found_flag, d_found_result, u256_of(S), 0);   // centre point (x1): offset 0
         }
 
         uint64_t subp[MAX_BATCH_SIZE/2][4];
@@ -180,30 +216,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
-                    if (full) {
-                        if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
-                            uint64_t addv=(uint64_t)(i+1);
-                            { uint64_t old=fs[0]; fs[0]=old+addv; addv=(fs[0]<old)?1ull:0ull; }
-                            { uint64_t old=fs[1]; fs[1]=old+addv; addv=(fs[1]<old)?1ull:0ull; }
-                            { uint64_t old=fs[2]; fs[2]=old+addv; addv=(fs[2]<old)?1ull:0ull; }
-                            { uint64_t old=fs[3]; fs[3]=old+addv; addv=(fs[3]<old)?1ull:0ull; }
-                            d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
-                            d_found_result->Rx[0]=px3[0]; d_found_result->Rx[1]=px3[1]; d_found_result->Rx[2]=px3[2]; d_found_result->Rx[3]=px3[3];
-                           
-                            uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
-                            d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
-                            __threadfence_system();
-                            atomicExch(d_found_flag, FOUND_READY);
-                        }
-                    }
-                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                    // collision must keep scanning, else the skipped write-back drops keys.
-                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
-                }
+                if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
+                    record_found(d_found_flag, d_found_result, u256_of(S), (int32_t)(i + 1));   // +iG
             }
 
             {
@@ -224,29 +238,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
-                    if (full) {
-                        if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
-                            uint64_t sub=(uint64_t)(i+1);
-                            { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[2]; fs[2]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[3]; fs[3]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
-                            d_found_result->Rx[0]=px3[0]; d_found_result->Rx[1]=px3[1]; d_found_result->Rx[2]=px3[2]; d_found_result->Rx[3]=px3[3];
-                            uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
-                            d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
-                            __threadfence_system();
-                            atomicExch(d_found_flag, FOUND_READY);
-                        }
-                    }
-                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                    // collision must keep scanning, else the skipped write-back drops keys.
-                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
-                }
+                if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
+                    record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)(i + 1));  // -iG
             }
 
             uint64_t gxmi[4];
@@ -277,29 +270,8 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
             H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
-            if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
-                if (full) {
-                    if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                        uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
-                        uint64_t sub=(uint64_t)half;
-                        { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
-                        { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
-                        { uint64_t old=fs[2]; fs[2]=old-sub; sub=(old<sub)?1ull:0ull; }
-                        { uint64_t old=fs[3]; fs[3]=old-sub; sub=(old<sub)?1ull:0ull; }
-                        d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
-                        d_found_result->Rx[0]=px3[0]; d_found_result->Rx[1]=px3[1]; d_found_result->Rx[2]=px3[2]; d_found_result->Rx[3]=px3[3];
-                        uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
-                        d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
-                        __threadfence_system();
-                        atomicExch(d_found_flag, FOUND_READY);
-                    }
-                }
-                // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                // collision must keep scanning, else the skipped write-back drops keys.
-                if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
-            }
+            if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
+                record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)half);   // last point
 
             uint64_t last_dx[4];
             last_dx[0] = c_Gx[(size_t)i*4 + 0]; last_dx[1] = c_Gx[(size_t)i*4 + 1]; last_dx[2] = c_Gx[(size_t)i*4 + 2]; last_dx[3] = c_Gx[(size_t)i*4 + 3];
@@ -866,9 +838,52 @@ int main(int argc, char** argv) {
     if (h_found_flag == FOUND_READY) {
         FoundResult host_result{};
         ck(cudaMemcpy(&host_result, d_found_result, sizeof(FoundResult), cudaMemcpyDeviceToHost), "read found_result");
+
+        // Recover the private key: priv = scalar + offset, where scalar is the batch centre the
+        // finding thread was on and offset is its signed intra-batch delta.
+        //
+        // Two branches, NOT one, because the magnitude must be taken BEFORE widening: casting a
+        // negative int32_t straight to uint64_t sign-extends to ~2^64 and yields a wrong key that
+        // still prints as a well-formed 64-hex-digit number. Negating through int64_t also keeps
+        // -INT32_MIN well-defined regardless of any future change to B or the offset type.
+        //
+        // No modular reduction, deliberately. The offset alphabet is ASYMMETRIC: the loop emits
+        // 0 and +/-(i+1) for i in [0, half-2], and the tail block spends the extreme slot on -half
+        // and never on +half -- so offsets span [-half, +half-1], exactly B contiguous values, and
+        // batches tile seamlessly because S advances by exactly B. Thread 0's first centre is
+        // range_start + half, so the floor is exactly range_start; the host also forces
+        // range_len % threadsTotal == 0 and per_thread_cnt % B == 0, so coverage is exact and the
+        // ceiling is exactly range_end (range_start + range_len - 1, with range_len defined
+        // inclusively as range_end - range_start + 1). priv therefore can neither underflow past
+        // range_start nor come anywhere near the group order, and a mod-n step here would be a
+        // bug, not a safeguard.
+        uint64_t priv[4] = { host_result.scalar[0], host_result.scalar[1],
+                             host_result.scalar[2], host_result.scalar[3] };
+        if (host_result.offset >= 0) {
+            uint64_t c = (uint64_t)(int64_t)host_result.offset;          // first "carry" is the full magnitude
+            for (int j = 0; j < 4 && c; ++j) { uint64_t old = priv[j]; priv[j] = old + c; c = (priv[j] < old) ? 1ull : 0ull; }
+        } else {
+            uint64_t b = (uint64_t)(-(int64_t)host_result.offset);       // magnitude first, then borrow
+            for (int j = 0; j < 4 && b; ++j) { uint64_t old = priv[j]; priv[j] = old - b; b = (old < b) ? 1ull : 0ull; }
+        }
+
+        // Re-derive the pubkey on the GPU with the scalar-mult kernel that already seeds every base
+        // point in the run -- rather than porting a second, unvalidated host-side secp256k1. This is
+        // a one-shot <<<1,1>>> launch on the report path, and it is legal here: we are past
+        // tWorker.join() and cudaDeviceSynchronize(), so main owns CUDA again, and before the frees.
+        // d_start_scalars/d_Px/d_Py are provably dead now that the search has ended, so they are
+        // reused as scratch and no new allocation or failure path is introduced.
+        uint64_t hRx[4], hRy[4];
+        ck(cudaMemcpy(d_start_scalars, priv, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "H2D found priv");
+        scalarMulKernelBase<<<1, 1>>>(d_start_scalars, d_Px, d_Py, 1);
+        ck(cudaDeviceSynchronize(), "scalarMulKernelBase(found) sync");
+        ck(cudaGetLastError(),      "scalarMulKernelBase(found) launch");
+        ck(cudaMemcpy(hRx, d_Px, 4 * sizeof(uint64_t), cudaMemcpyDeviceToHost), "D2H found Rx");
+        ck(cudaMemcpy(hRy, d_Py, 4 * sizeof(uint64_t), cudaMemcpyDeviceToHost), "D2H found Ry");
+
         std::cout << "\n======== FOUND MATCH! =================================\n";
-        std::cout << "Private Key   : " << formatHex256(host_result.scalar) << "\n";
-        std::cout << "Public Key    : " << formatCompressedPubHex(host_result.Rx, host_result.Ry) << "\n";
+        std::cout << "Private Key   : " << formatHex256(priv) << "\n";
+        std::cout << "Public Key    : " << formatCompressedPubHex(hRx, hRy) << "\n";
     } else if (launch_error.load()) {
         std::cerr << "======== CUDA ERROR ===================================\n";
         std::cerr << "Search aborted by a CUDA error: " << cudaGetErrorString(worker_cuda_err) << "\n";
