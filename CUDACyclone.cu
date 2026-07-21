@@ -176,13 +176,14 @@ __global__ void kernel_point_add_and_check_oneinv(
         uint64_t subp[MAX_BATCH_SIZE/2][4];
         uint64_t acc[4], tmp[4];
 
-        acc[0] = c_Jx[0]; acc[1] = c_Jx[1]; acc[2] = c_Jx[2]; acc[3] = c_Jx[3];
-        ModSub256(acc, acc, x1);
+        // Read the __constant__ operand straight into the subtract instead of copying it into the
+        // destination first. ModSub256 takes uint64_t* and __constant__ is a memory space, not a
+        // const qualifier, so c_Jx decays and binds directly. Same pattern at every dx site below.
+        ModSub256(acc, c_Jx, x1);
         subp[half-1][0] = acc[0]; subp[half-1][1] = acc[1]; subp[half-1][2] = acc[2]; subp[half-1][3] = acc[3];
 
         for (int i = half - 2; i >= 0; --i) {
-            tmp[0] = c_Gx[(size_t)(i+1)*4 + 0]; tmp[1] = c_Gx[(size_t)(i+1)*4 + 1]; tmp[2] = c_Gx[(size_t)(i+1)*4 + 2]; tmp[3] = c_Gx[(size_t)(i+1)*4 + 3];
-            ModSub256(tmp, tmp, x1);
+            ModSub256(tmp, &c_Gx[(size_t)(i+1)*4], x1);
             _ModMult(acc, acc, tmp);
             subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
         }
@@ -191,8 +192,7 @@ __global__ void kernel_point_add_and_check_oneinv(
         // res[8] (RCGpuUtils.h:529), the low half of inverse[4] -- a [4] declaration is a 4-byte
         // OOB store into whatever the allocator put next. See ec_backend.cuh:93.
         uint64_t inverse[5];
-        inverse[0] = c_Gx[0]; inverse[1] = c_Gx[1]; inverse[2] = c_Gx[2]; inverse[3] = c_Gx[3];
-        ModSub256(inverse, inverse, x1);   // d0 = c_Gx[0] - x1, built in place (no separate d0[4])
+        ModSub256(inverse, c_Gx, x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
         _ModMult(inverse, subp[0]);
         // No zero-init of inverse[4] here: InvModP sets res[8]=0 itself BEFORE its first read of
         // res[0..7] (RCGpuUtils.h:529-531), and res[9] (the high half) is never read or written --
@@ -248,8 +248,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             }
 
             uint64_t gxmi[4];
-            gxmi[0] = c_Gx[(size_t)i*4 + 0]; gxmi[1] = c_Gx[(size_t)i*4 + 1]; gxmi[2] = c_Gx[(size_t)i*4 + 2]; gxmi[3] = c_Gx[(size_t)i*4 + 3];
-            ModSub256(gxmi, gxmi, x1);
+            ModSub256(gxmi, &c_Gx[(size_t)i*4], x1);
             _ModMult(inverse, inverse, gxmi);
         }
 
@@ -279,8 +278,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                 record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)half);   // last point
 
             uint64_t last_dx[4];
-            last_dx[0] = c_Gx[(size_t)i*4 + 0]; last_dx[1] = c_Gx[(size_t)i*4 + 1]; last_dx[2] = c_Gx[(size_t)i*4 + 2]; last_dx[3] = c_Gx[(size_t)i*4 + 3];
-            ModSub256(last_dx, last_dx, x1);
+            ModSub256(last_dx, &c_Gx[(size_t)i*4], x1);
             _ModMult(inverse, inverse, last_dx);
         }
 
@@ -288,8 +286,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint64_t lam[4], s[4], x3[4], y3[4];
 
             uint64_t Jy_minus_y1[4];
-            Jy_minus_y1[0] = c_Jy[0]; Jy_minus_y1[1] = c_Jy[1]; Jy_minus_y1[2] = c_Jy[2]; Jy_minus_y1[3] = c_Jy[3];
-            ModSub256(Jy_minus_y1, Jy_minus_y1, y1);
+            ModSub256(Jy_minus_y1, c_Jy, y1);
 
             _ModMult(lam, Jy_minus_y1, inverse);
             _ModSqr(x3, lam);
