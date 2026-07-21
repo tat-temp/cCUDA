@@ -187,12 +187,17 @@ __global__ void kernel_point_add_and_check_oneinv(
             subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
         }
 
-        uint64_t d0[4], inverse[5];
-        d0[0] = c_Gx[0]; d0[1] = c_Gx[1]; d0[2] = c_Gx[2]; d0[3] = c_Gx[3];
-        ModSub256(d0, d0, x1);
-        inverse[0] = d0[0]; inverse[1] = d0[1]; inverse[2] = d0[2]; inverse[3] = d0[3];
+        // inverse MUST stay uint64_t[5] even though only 4 limbs are ever read: InvModP writes
+        // res[8] (RCGpuUtils.h:529), the low half of inverse[4] -- a [4] declaration is a 4-byte
+        // OOB store into whatever the allocator put next. See ec_backend.cuh:93.
+        uint64_t inverse[5];
+        inverse[0] = c_Gx[0]; inverse[1] = c_Gx[1]; inverse[2] = c_Gx[2]; inverse[3] = c_Gx[3];
+        ModSub256(inverse, inverse, x1);   // d0 = c_Gx[0] - x1, built in place (no separate d0[4])
         _ModMult(inverse, subp[0]);
-        inverse[4] = 0ull;
+        // No zero-init of inverse[4] here: InvModP sets res[8]=0 itself BEFORE its first read of
+        // res[0..7] (RCGpuUtils.h:529-531), and res[9] (the high half) is never read or written --
+        // every downstream op on res is 288-bit, res[0..8]. After this, inverse is read as 4 limbs
+        // only (the running _ModMult at each loop tail, and the final lam multiply).
         _ModInv(inverse);
 
         for (int i = 0; i < half - 1; ++i) {
