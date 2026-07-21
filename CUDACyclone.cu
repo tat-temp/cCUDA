@@ -84,9 +84,10 @@ __constant__ uint64_t c_Jy[4];
 // __forceinline__, so the pack is register moves and S's address never escapes -- the same
 // mechanism already proven on getHash160_33_from_limbs(prefix, u256_of(x1)) in this kernel.
 //
-// Contains NO warp-collective op (only atomicCAS / plain stores / threadfence / atomicExch), which
-// is what makes it legal to call from divergent control flow after the __any_sync votes are gone.
-// Keep it that way.
+// Contains NO warp-collective op (only atomicCAS / plain stores / threadfence / atomicExch). The
+// call sites sit inside an __any_sync uniformity gate, but the INNER test is still per-thread, so
+// a single lane can reach this alone. Keep it collective-free: a warp-collective here would be UB
+// on that path.
 //
 // __forceinline__, NOT __noinline__ -- and the reason is MEASURED, not aesthetic. Shipping this as
 // __noinline__ (9806eae) cost -0.48% keys/cycle against 62e2575, and the static evidence isolates
@@ -141,6 +142,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     if (gid >= threadsTotal) return;
 
     const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));   // still needed by WARP_FLUSH_HASHES
+    const unsigned full_mask = 0xFFFFFFFFu;
 
     const uint32_t target_prefix = c_target_words[0];
 
@@ -178,12 +180,21 @@ __global__ void kernel_point_add_and_check_oneinv(
         {
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             H160 h5 = getHash160_33_from_limbs(prefix, u256_of(x1));   // by-value ABI: h5 stays in regs
-            // Per-thread compare, no warp vote. The old __any_sync gate ran a VOTE on EVERY point
-            // for a ~2^-32 event; a plain per-thread test is cheaper and, with the early return
-            // gone, needs no warp uniformity. See the note at the write-back for why not returning
-            // is the correctness-forced choice, not merely the simpler one.
-            if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
-                record_found(d_found_flag, d_found_result, u256_of(S), 0);   // centre point (x1): offset 0
+            // WARP-UNIFORM GATE, restored after measurement. 9806eae replaced this __any_sync with
+            // a per-thread test on the theory that a VOTE per point for a ~2^-32 event was waste.
+            // That was wrong and it cost keys/cycle: the vote is not buying the compare, it is
+            // buying UNIFORMITY. With it, the whole found region is a single warp-uniform branch
+            // the scheduler skips in one go; without it, every point carries a divergent region.
+            // Measured (vs 62e2575, 5 reps): per-thread + out-of-line CALL -0.48%, per-thread +
+            // inline -1.05%. Do not "simplify" this away again -- see the 2x2 in the commit log.
+            //
+            // The INNER vote (on `full`) and the early return are deliberately NOT restored: those
+            // were the PR#5 prefix-skip hazard. Only the outer uniformity gate comes back.
+            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            if (__any_sync(full_mask, pref)) {
+                if (pref && hash160_matches_full(h5.w, c_target_words))
+                    record_found(d_found_flag, d_found_result, u256_of(S), 0);   // centre (x1): offset 0
+            }
         }
 
         uint64_t subp[MAX_BATCH_SIZE/2][4];
@@ -234,8 +245,11 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
-                    record_found(d_found_flag, d_found_result, u256_of(S), (int32_t)(i + 1));   // +iG
+                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                if (__any_sync(full_mask, pref)) {
+                    if (pref && hash160_matches_full(h5.w, c_target_words))
+                        record_found(d_found_flag, d_found_result, u256_of(S), (int32_t)(i + 1));   // +iG
+                }
             }
 
             {
@@ -256,8 +270,11 @@ __global__ void kernel_point_add_and_check_oneinv(
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
                 H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
-                    record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)(i + 1));  // -iG
+                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                if (__any_sync(full_mask, pref)) {
+                    if (pref && hash160_matches_full(h5.w, c_target_words))
+                        record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)(i + 1));  // -iG
+                }
             }
 
             uint64_t gxmi[4];
@@ -287,8 +304,11 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
             H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-            if (hash160_prefix_equals(h5.w, target_prefix) && hash160_matches_full(h5.w, c_target_words))
-                record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)half);   // last point
+            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            if (__any_sync(full_mask, pref)) {
+                if (pref && hash160_matches_full(h5.w, c_target_words))
+                    record_found(d_found_flag, d_found_result, u256_of(S), -(int32_t)half);   // last point
+            }
 
             uint64_t last_dx[4];
             ModSub256(last_dx, &c_Gx[(size_t)i*4], x1);
