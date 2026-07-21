@@ -87,7 +87,20 @@ __constant__ uint64_t c_Jy[4];
 // Contains NO warp-collective op (only atomicCAS / plain stores / threadfence / atomicExch), which
 // is what makes it legal to call from divergent control flow after the __any_sync votes are gone.
 // Keep it that way.
-__device__ __noinline__ void record_found(
+//
+// __forceinline__, NOT __noinline__ -- and the reason is MEASURED, not aesthetic. Shipping this as
+// __noinline__ (9806eae) cost -0.48% keys/cycle against 62e2575, and the static evidence isolates
+// the CALL as the only candidate: that commit cut instructions 16128 -> 14776 (-8.4%), BSSY/BSYNC
+// 140 -> 122, and VOTE 18 -> 2, while raising CALL sites 4 -> 8. Every count improved except the
+// calls, and it still got slower. The mechanism is scheduling, not execution: these four sites are
+// never taken (~2^-32), but a CALL is a barrier ptxas will not move loads or ALU work across, so
+// four extra barriers in the loop body cost latency hiding that no static count reveals.
+// This does NOT contradict PR#15's keep-getHash160-__noinline__ finding: that call is on the
+// ALWAYS-taken path with a tuned by-value ABI and a ~R64 working set worth isolating. These are
+// never-taken calls inside conditionals -- opposite structure, opposite answer.
+// The by-value ABI note above still applies and must be preserved: inlining makes s a plain SROA'd
+// register pack, which is strictly safer than the pointer form, never worse.
+__device__ __forceinline__ void record_found(
     int* __restrict__ d_found_flag,
     FoundResult* __restrict__ d_found_result,
     U256 s, int32_t offset)
