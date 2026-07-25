@@ -78,12 +78,9 @@ std::string formatHex256(const uint64_t limbs[4]) {
 }
 
 // h5/target_w hold a hash160 as 5 little-endian 32-bit words (word i = bytes [4i..4i+3]).
-static __device__ __forceinline__ bool hash160_prefix_equals(
-    const uint32_t h5[5], uint32_t target_prefix)
-{
-    return h5[0] == target_prefix;
-}
-
+// NOTE: there is deliberately no `prefix_equals(h5, w0)` helper any more. The 32-bit filter
+// runs on WORD 2 (see CUDACyclone.cu / the RIPEMD-160 trim in CUDAHash.cu) and never
+// materializes an H160 at all -- it compares getHash160_w2_from_limbs()'s return directly.
 static __device__ __forceinline__ bool hash160_matches_full(
     const uint32_t h5[5], const uint32_t target_w[5])
 {

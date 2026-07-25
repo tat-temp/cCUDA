@@ -51,6 +51,17 @@ static void handle_sigint(int) { g_sigint = 1; }
 // also keeps every launch on its normal per-thread state write-back path (no early-return-
 // before-writeback, the historical prefix-skip hazard).
 
+// Rare path (~2^-32 of keys): a word-2 filter hit. Recompute the full 160-bit digest with the
+// untrimmed hash and compare all five words. Kept __forceinline__ so each call site keeps the
+// exact `bool full = pref && ...` shape it had when the filter was word 0 -- the found path's
+// loop structure is load-bearing (see the 2026-07-22 found-path-refactor regression).
+__device__ __forceinline__ bool hash160_full_match(uint8_t prefix02_03, U256 x,
+                                                   const uint32_t target_w[5])
+{
+    H160 h5 = getHash160_33_from_limbs(prefix02_03, x);
+    return hash160_matches_full(h5.w, target_w);
+}
+
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Jx[4];
@@ -83,7 +94,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
     const unsigned full_mask = 0xFFFFFFFFu;
 
-    const uint32_t target_prefix = c_target_words[0];
+    // Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
+    // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
+    // is an equally selective 32-bit filter, so this is a free choice.
+    const uint32_t target_prefix = c_target_words[2];
 
     unsigned int local_hashes = 0;
     #define FLUSH_THRESHOLD 65536u
@@ -118,10 +132,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
         {
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-            H160 h5 = getHash160_33_from_limbs(prefix, u256_of(x1));   // by-value ABI: h5 stays in regs
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
+            bool pref = (hw2 == target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         d_found_result->scalar[0]=S[0]; d_found_result->scalar[1]=S[1]; d_found_result->scalar[2]=S[2]; d_found_result->scalar[3]=S[3];
@@ -184,10 +198,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = (hw2 == target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -228,10 +242,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = (hw2 == target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -280,10 +294,10 @@ __global__ void kernel_point_add_and_check_oneinv(
             _ModMult(s, s, lam);
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-            H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+            bool pref = (hw2 == target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];

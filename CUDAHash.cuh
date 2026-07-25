@@ -56,6 +56,12 @@ __device__ __forceinline__ U256 u256_of(const uint64_t x[4]) {
     U256 r; r.v[0] = x[0]; r.v[1] = x[1]; r.v[2] = x[2]; r.v[3] = x[3]; return r;
 }
 
+// Hot path: hash160 word 2 only (the cheapest of the five to produce -- see the trim rationale
+// on RIPEMD160Transform in CUDAHash.cu). Returning one register instead of five also narrows
+// the by-value ABI described above, in the same direction that won PR#15.
+__device__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x);
+
+// Cold path: the full 160-bit digest, for confirming a word-2 filter hit (~2^-32 of keys).
 __device__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x);
 
 #endif
