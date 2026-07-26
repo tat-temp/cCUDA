@@ -35,6 +35,16 @@ Sample start
 ```
 python3 proof.py --range 200000000:3FFFFFFFF --grid 512,512
 ```
+The "Full mod B residue coverage" block only means anything if proof.py's B is the batch size the
+**kernel** actually uses — otherwise the residue classes it never generates are simply never
+tested, and the run still reports every test as a pass. So proof.py now reads the batch size back
+out of CUDACyclone's own banner and uses that:
+
+* **Omit `--grid`** to validate whatever the binary ships as its compiled default.
+* **`--batch N`** is an *assertion*, not an override: if it disagrees with the kernel, proof.py
+  refuses to run rather than silently shrink its coverage.
+* Before the first test it prints the resolved batch, the planned test count, and a confirmation
+  that all B residue classes are covered (848 tests at B=512, 1360 at B=1024).
 Results
 ```
 ================ Summary by blocks ================
