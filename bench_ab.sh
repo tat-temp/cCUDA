@@ -276,6 +276,9 @@ run_once() {  # $1 = binary ; $2 = grid ; $3 = extra args ; echoes "kc clk_mean 
 
 : > "$TMP/all.dat"
 if [ "$GRID_A" = "$GRID_B" ]; then geom="GRID=$GRID_A"; else geom="GRID_A=$GRID_A GRID_B=$GRID_B"; fi
+# Slices belong in the header too: without them a pasted rep block cannot be checked for the
+# keys-per-launch symmetry the untimed phases depend on.
+[ -z "$SLICES_A$SLICES_B" ] || geom="$geom SLICES_A=${SLICES_A:-default} SLICES_B=${SLICES_B:-default}"
 [ "$AA_NULL" = "1" ] && echo "== A/A NULL: both arms are identical -- this measures the HARNESS NOISE FLOOR, not a change =="
 echo "== $REPS interleaved reps (SOAK=${SOAK}s PREWARM=${PREWARM}s WARMUP=${WARMUP}s WINDOW=${WINDOW}s $geom) =="
 # REPS odd => the ABAB alternation is unbalanced (3 A-first vs 2 B-first at the default 5), so
