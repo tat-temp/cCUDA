@@ -22,8 +22,21 @@ __device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
     return a ^ b ^ c;
 }
 
-__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return xor3(ror32(x, 2), ror32(x, 13), ror32(x, 22)); }
-__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return xor3(ror32(x, 6), ror32(x, 11), ror32(x, 25)); }
+// Sigma0/Sigma1 with the common rotate hoisted OUT of the xor. Rotation is GF(2)-linear, so
+//     ror(a,k) ^ ror(b,k) ^ ror(c,k)  ==  ror(a ^ b ^ c, k)
+// and with k=2 / k=6 the inner amounts collapse to 13-2=11, 22-2=20 / 11-6=5, 25-6=19. This is
+// an identity, not an approximation: agreement on the 32 basis vectors is a COMPLETE proof over
+// all 2^32 inputs (host-checked, plus 500k random values and the usual edge set, 0 mismatches).
+//
+// WHY: instruction COUNT is unchanged (3 SHF + 1 LOP3 either way). The bet is placement -- the
+// surviving rotate now sits at the OUTSIDE of the expression, adjacent to the T1/T2 accumulation
+// in SHA_RND, where ptxas can fold it into the add as LEA.HI:
+//     {3 SHF, 1 LOP3, 1 IADD} -> {2 SHF, 1 LOP3, 1 LEA}   x 126 live sites
+// It only pays if LEA is NOT on the ~1/3-rate logic/shift unit that binds this kernel; two
+// independent reviews argued it is. SCREEN BEFORE BENCHING: `make sass | grep -c SHF` must drop
+// by ~126. If it does not, the fusion did not fire -- revert, spend no bench slot.
+__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(xor3(x, ror32(x, 11), ror32(x, 20)), 2); }
+__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(xor3(x, ror32(x,  5), ror32(x, 19)), 6); }
 __device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
 __device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
 
