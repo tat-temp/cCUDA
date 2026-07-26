@@ -379,8 +379,24 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, handle_sigint);
 
     std::string target_hash_hex, range_hex, address_b58;
-    uint32_t runtime_points_batch_size = 128;
-    uint32_t runtime_batches_per_sm    = 8;
+    // Defaults = the configuration this project actually benchmarks. The former 128,8 was never
+    // exercised by any A/B (every benchmark passes --grid explicitly) and left roughly half the
+    // card on the floor: at batches_per_sm=8, userUpper = SM*8*256 caps threadsTotal at 2^18 =
+    // 1024 blocks against 340 resident (__launch_bounds__(256,2) on 170 SMs) = 3.01 waves ->
+    // ceil 4 -> ~75% launch utilization. At 512 the same arithmetic gives 65,536 blocks over
+    // 193 waves = 99.87%.
+    //
+    // batch size 1024 over 512: MEASURED +0.601% keys/cycle (5 reps) and +0.484% (6 reps,
+    // balanced), pooled +0.537% +- 0.063 over 11 reps, t=+8.49, total separation in both runs,
+    // clock flat at a pinned 600 W, A/A null clean at -0.088%. The only B-dependent term is the
+    // one safegcd InvModP per batch; mul/key, sqr/key, ModSub/key and subp[] traffic (32 B/key)
+    // are exactly B-invariant, and the subp frame is sized by MAX_BATCH_SIZE rather than B, so
+    // B=1024 costs no extra registers, frame or occupancy on any card.
+    //
+    // batches_per_sm=512 rests on the wave arithmetic above plus the campaign's entire measured
+    // history (every A/B since the start ran at 512); it has NOT been A/B'd against 8 directly.
+    uint32_t runtime_points_batch_size = 1024;
+    uint32_t runtime_batches_per_sm    = 512;
     uint32_t slices_per_launch         = 64;
 
     auto parse_grid = [](const std::string& s, uint32_t& a_out, uint32_t& b_out)->bool {
@@ -528,7 +544,10 @@ int main(int argc, char** argv) {
     uint64_t q_div_batch[4], r_div_batch = 0ull;
     divmod_256_by_u64(range_len, (uint64_t)runtime_points_batch_size, q_div_batch, r_div_batch);
     if (r_div_batch != 0ull) {
-        std::cerr << "Error: range length must be divisible by batch size (" << runtime_points_batch_size << ").\n";
+        // Reachable on a short range now that the default batch is 1024 rather than 128, so say
+        // how to fix it instead of only what is wrong.
+        std::cerr << "Error: range length must be divisible by batch size (" << runtime_points_batch_size << ").\n"
+                  << "       Pass a smaller points-per-batch, e.g. --grid 128,512, or widen the range.\n";
         return EXIT_FAILURE;
     }
     bool q_fits_u64 = (q_div_batch[3]|q_div_batch[2]|q_div_batch[1]) == 0ull;

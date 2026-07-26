@@ -93,7 +93,14 @@ Done. Results in cyclone_tests_results.txt. Successes=848 Failures=0
 - **--address**: P2PKH address.
 - **--target-hash160**: the same as address but hash160.
 - **--grid**: very usefull parameter. Example --grid 512,512 - first 512 - number of points each thread will process in one batch (Points batch size)., second 512 - number of threads in one group (Threads per batch).
-- **--slices**: batch per thread for one kernel launch.
+  **Default is `1024,512`** — the configuration this project benchmarks. It used to be `128,8`,
+  which no benchmark ever exercised and which left roughly half an RTX 5090 idle (1024 blocks
+  against 340 resident = 3.01 waves, so the fourth wave ran almost empty). If your range is
+  shorter than 1024 keys, or not divisible by 1024, pass a smaller first field — e.g.
+  `--grid 128,512`.
+- **--slices**: batch per thread for one kernel launch. Note this counts **batches**, not keys, so
+  doubling the points-per-batch also doubles the work per launch; halve `--slices` if you want the
+  launch duration held constant.
 
 ---
 
