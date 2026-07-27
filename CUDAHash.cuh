@@ -31,8 +31,13 @@
 // intra-module CALL.REL with a custom register convention rather than the conservative,
 // stack-heavy cross-TU ABI-stable one.
 //
-// On the f1-all3 kernel the residual 40-byte frame is exactly inverse[5] (5 x u64) -- the last
-// pointer-escape, because _ModInv(uint64_t*) is still __noinline__. Mole carries 32 B likewise.
+// On the RETIRED f1-all3 kernel the residual 40-byte frame was exactly inverse[5] (5 x u64) -- the
+// last pointer-escape, because _ModInv was __noinline__ THERE. Mole carried 32 B likewise.
+// THIS NO LONGER DESCRIBES THIS SOURCE: _ModInv is __forceinline__ (CUDAMath.h:138), so inverse[5]
+// stays in registers and the frame is exactly subp[] (16 KB) and nothing else. Kept because the
+// dependency still bites: if _ModInv or InvModP is ever made __noinline__ again, inverse becomes
+// addressable, lands in the frame, and the zero-init elided at CUDACyclone.cu:~195 turns back into
+// real STLs. Recheck both together.
 //
 // ⚠ THE ABSOLUTE FRAME NUMBERS ABOVE ARE f1-all3-SPECIFIC -- do not read them as a gate on every
 // kernel. A kernel that declares a large LOCAL array has that array in its stack frame too: main's
@@ -51,6 +56,12 @@ __device__ __forceinline__ U256 u256_of(const uint64_t x[4]) {
     U256 r; r.v[0] = x[0]; r.v[1] = x[1]; r.v[2] = x[2]; r.v[3] = x[3]; return r;
 }
 
+// Hot path: hash160 word 2 only (the cheapest of the five to produce -- see the trim rationale
+// on RIPEMD160Transform in CUDAHash.cu). Returning one register instead of five also narrows
+// the by-value ABI described above, in the same direction that won PR#15.
+__device__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x);
+
+// Cold path: the full 160-bit digest, for confirming a word-2 filter hit (~2^-32 of keys).
 __device__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x);
 
 #endif

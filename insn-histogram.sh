@@ -5,8 +5,8 @@
 #     bash insn-histogram.sh CUDACyclone  # weigh an already-built binary (skip build)
 #
 # Ranks every kernel + device function by its TRUE SASS instruction count so perf work
-# targets the fattest functions that still have headroom.  Companion to phase0-inspect.sh
-# (which reports occupancy/spills); this one answers "which function is worth trimming".
+# targets the fattest functions that still have headroom.  Companion to `make gate`
+# (which checks registers/spills); this one answers "which function is worth trimming".
 #
 # Counting rule: one instruction == one offset-tagged line '/*hhhh*/'.  The encoding-
 # continuation and trailing-encoding tokens print as '/* 0x..' (a space after /*), so a

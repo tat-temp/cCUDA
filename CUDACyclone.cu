@@ -51,6 +51,17 @@ static void handle_sigint(int) { g_sigint = 1; }
 // also keeps every launch on its normal per-thread state write-back path (no early-return-
 // before-writeback, the historical prefix-skip hazard).
 
+// Rare path (~2^-32 of keys): a word-2 filter hit. Recompute the full 160-bit digest with the
+// untrimmed hash and compare all five words. Kept __forceinline__ so each call site keeps the
+// exact `bool full = pref && ...` shape it had when the filter was word 0 -- the found path's
+// loop structure is load-bearing (see the 2026-07-22 found-path-refactor regression).
+__device__ __forceinline__ bool hash160_full_match(uint8_t prefix02_03, U256 x,
+                                                   const uint32_t target_w[5])
+{
+    H160 h5 = getHash160_33_from_limbs(prefix02_03, x);
+    return hash160_matches_full(h5.w, target_w);
+}
+
 __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
 __constant__ uint64_t c_Jx[4];
@@ -83,7 +94,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
     const unsigned full_mask = 0xFFFFFFFFu;
 
-    const uint32_t target_prefix = c_target_words[0];
+    // Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
+    // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
+    // is an equally selective 32-bit filter, so this is a free choice.
+    const uint32_t target_prefix = c_target_words[2];
 
     unsigned int local_hashes = 0;
     #define FLUSH_THRESHOLD 65536u
@@ -118,10 +132,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
         {
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-            H160 h5 = getHash160_33_from_limbs(prefix, u256_of(x1));   // by-value ABI: h5 stays in regs
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
+            bool pref = (hw2 == target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         d_found_result->scalar[0]=S[0]; d_found_result->scalar[1]=S[1]; d_found_result->scalar[2]=S[2]; d_found_result->scalar[3]=S[3];
@@ -140,23 +154,28 @@ __global__ void kernel_point_add_and_check_oneinv(
         uint64_t subp[MAX_BATCH_SIZE/2][4];
         uint64_t acc[4], tmp[4];
 
-        acc[0] = c_Jx[0]; acc[1] = c_Jx[1]; acc[2] = c_Jx[2]; acc[3] = c_Jx[3];
-        ModSub256(acc, acc, x1);
+        // Read the __constant__ operand straight into the subtract instead of copying it into the
+        // destination first. ModSub256 takes uint64_t* and __constant__ is a memory space, not a
+        // const qualifier, so c_Jx decays and binds directly. Same pattern at every dx site below.
+        ModSub256(acc, c_Jx, x1);
         subp[half-1][0] = acc[0]; subp[half-1][1] = acc[1]; subp[half-1][2] = acc[2]; subp[half-1][3] = acc[3];
 
         for (int i = half - 2; i >= 0; --i) {
-            tmp[0] = c_Gx[(size_t)(i+1)*4 + 0]; tmp[1] = c_Gx[(size_t)(i+1)*4 + 1]; tmp[2] = c_Gx[(size_t)(i+1)*4 + 2]; tmp[3] = c_Gx[(size_t)(i+1)*4 + 3];
-            ModSub256(tmp, tmp, x1);
+            ModSub256(tmp, &c_Gx[(size_t)(i+1)*4], x1);
             _ModMult(acc, acc, tmp);
             subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
         }
 
-        uint64_t d0[4], inverse[5];
-        d0[0] = c_Gx[0]; d0[1] = c_Gx[1]; d0[2] = c_Gx[2]; d0[3] = c_Gx[3];
-        ModSub256(d0, d0, x1);
-        inverse[0] = d0[0]; inverse[1] = d0[1]; inverse[2] = d0[2]; inverse[3] = d0[3];
+        // inverse MUST stay uint64_t[5] even though only 4 limbs are ever read: InvModP writes
+        // res[8] (RCGpuUtils.h:529), the low half of inverse[4] -- a [4] declaration is a 4-byte
+        // OOB store into whatever the allocator put next. See ec_backend.cuh:93.
+        uint64_t inverse[5];
+        ModSub256(inverse, c_Gx, x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
         _ModMult(inverse, subp[0]);
-        inverse[4] = 0ull;
+        // No zero-init of inverse[4] here: InvModP sets res[8]=0 itself BEFORE its first read of
+        // res[0..7] (RCGpuUtils.h:529-531), and res[9] (the high half) is never read or written --
+        // every downstream op on res is 288-bit, res[0..8]. After this, inverse is read as 4 limbs
+        // only (the running _ModMult at each loop tail, and the final lam multiply).
         _ModInv(inverse);
 
         for (int i = 0; i < half - 1; ++i) {
@@ -179,10 +198,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = (hw2 == target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -223,10 +242,10 @@ __global__ void kernel_point_add_and_check_oneinv(
                 _ModMult(s, s, lam);
                 uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-                H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = hash160_prefix_equals(h5.w, target_prefix);
+                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+                bool pref = (hw2 == target_prefix);
                 if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -250,8 +269,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             }
 
             uint64_t gxmi[4];
-            gxmi[0] = c_Gx[(size_t)i*4 + 0]; gxmi[1] = c_Gx[(size_t)i*4 + 1]; gxmi[2] = c_Gx[(size_t)i*4 + 2]; gxmi[3] = c_Gx[(size_t)i*4 + 3];
-            ModSub256(gxmi, gxmi, x1);
+            ModSub256(gxmi, &c_Gx[(size_t)i*4], x1);
             _ModMult(inverse, inverse, gxmi);
         }
 
@@ -276,10 +294,10 @@ __global__ void kernel_point_add_and_check_oneinv(
             _ModMult(s, s, lam);
             uint8_t odd; ModSub256isOdd(s, y1, &odd);
 
-            H160 h5 = getHash160_33_from_limbs(odd?0x03:0x02, u256_of(px3));
-            bool pref = hash160_prefix_equals(h5.w, target_prefix);
+            uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
+            bool pref = (hw2 == target_prefix);
             if (__any_sync(full_mask, pref)) {
-                bool full = pref && hash160_matches_full(h5.w, c_target_words);
+                bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
@@ -302,8 +320,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             }
 
             uint64_t last_dx[4];
-            last_dx[0] = c_Gx[(size_t)i*4 + 0]; last_dx[1] = c_Gx[(size_t)i*4 + 1]; last_dx[2] = c_Gx[(size_t)i*4 + 2]; last_dx[3] = c_Gx[(size_t)i*4 + 3];
-            ModSub256(last_dx, last_dx, x1);
+            ModSub256(last_dx, &c_Gx[(size_t)i*4], x1);
             _ModMult(inverse, inverse, last_dx);
         }
 
@@ -311,8 +328,7 @@ __global__ void kernel_point_add_and_check_oneinv(
             uint64_t lam[4], s[4], x3[4], y3[4];
 
             uint64_t Jy_minus_y1[4];
-            Jy_minus_y1[0] = c_Jy[0]; Jy_minus_y1[1] = c_Jy[1]; Jy_minus_y1[2] = c_Jy[2]; Jy_minus_y1[3] = c_Jy[3];
-            ModSub256(Jy_minus_y1, Jy_minus_y1, y1);
+            ModSub256(Jy_minus_y1, c_Jy, y1);
 
             _ModMult(lam, Jy_minus_y1, inverse);
             _ModSqr(x3, lam);
@@ -363,8 +379,24 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, handle_sigint);
 
     std::string target_hash_hex, range_hex, address_b58;
-    uint32_t runtime_points_batch_size = 128;
-    uint32_t runtime_batches_per_sm    = 8;
+    // Defaults = the configuration this project actually benchmarks. The former 128,8 was never
+    // exercised by any A/B (every benchmark passes --grid explicitly) and left roughly half the
+    // card on the floor: at batches_per_sm=8, userUpper = SM*8*256 caps threadsTotal at 2^18 =
+    // 1024 blocks against 340 resident (__launch_bounds__(256,2) on 170 SMs) = 3.01 waves ->
+    // ceil 4 -> ~75% launch utilization. At 512 the same arithmetic gives 65,536 blocks over
+    // 193 waves = 99.87%.
+    //
+    // batch size 1024 over 512: MEASURED +0.601% keys/cycle (5 reps) and +0.484% (6 reps,
+    // balanced), pooled +0.537% +- 0.063 over 11 reps, t=+8.49, total separation in both runs,
+    // clock flat at a pinned 600 W, A/A null clean at -0.088%. The only B-dependent term is the
+    // one safegcd InvModP per batch; mul/key, sqr/key, ModSub/key and subp[] traffic (32 B/key)
+    // are exactly B-invariant, and the subp frame is sized by MAX_BATCH_SIZE rather than B, so
+    // B=1024 costs no extra registers, frame or occupancy on any card.
+    //
+    // batches_per_sm=512 rests on the wave arithmetic above plus the campaign's entire measured
+    // history (every A/B since the start ran at 512); it has NOT been A/B'd against 8 directly.
+    uint32_t runtime_points_batch_size = 1024;
+    uint32_t runtime_batches_per_sm    = 512;
     uint32_t slices_per_launch         = 64;
 
     auto parse_grid = [](const std::string& s, uint32_t& a_out, uint32_t& b_out)->bool {
@@ -512,7 +544,10 @@ int main(int argc, char** argv) {
     uint64_t q_div_batch[4], r_div_batch = 0ull;
     divmod_256_by_u64(range_len, (uint64_t)runtime_points_batch_size, q_div_batch, r_div_batch);
     if (r_div_batch != 0ull) {
-        std::cerr << "Error: range length must be divisible by batch size (" << runtime_points_batch_size << ").\n";
+        // Reachable on a short range now that the default batch is 1024 rather than 128, so say
+        // how to fix it instead of only what is wrong.
+        std::cerr << "Error: range length must be divisible by batch size (" << runtime_points_batch_size << ").\n"
+                  << "       Pass a smaller points-per-batch, e.g. --grid 128,512, or widen the range.\n";
         return EXIT_FAILURE;
     }
     bool q_fits_u64 = (q_div_batch[3]|q_div_batch[2]|q_div_batch[1]) == 0ull;
@@ -711,34 +746,123 @@ int main(int argc, char** argv) {
     (void)cudaFuncSetCacheConfig(kernel_point_add_and_check_oneinv, cudaFuncCachePreferL1);
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto tLast = t0;
-    unsigned long long lastHashes = 0ull;
 
-    bool stop_all = false;
-    bool completed_all = false;
-    while (!stop_all) {
-        if (g_sigint) std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
+    // ---- Host thread split ---------------------------------------------------------------
+    // THREE threads of execution, with one hard ownership rule:
+    //   * tWorker   (spawned) owns EVERY CUDA call for the duration of the search, plus the
+    //     d_Px/d_Rx ping-pong buffers.
+    //   * tListener (spawned) owns SIGINT translation and stdout, and makes NO CUDA call.
+    //   * main blocks in the joins and touches neither stdout nor CUDA until both are gone.
+    // That rule is what makes teardown provably safe: join() returns only after the thread's
+    // lambda has returned, so no CUDA call can be in flight or issued afterwards, and it
+    // supplies the happens-before that publishes worker_cuda_err / launch_error /
+    // completed_all and the mapped-page writes to main.
+    //
+    // stdout stays single-owner throughout: tListener alone prints between the spawns and the
+    // joins, so the Ctrl+C banner and the \r progress line cannot interleave and corrupt each
+    // other. main resumes printing only after tListener.join().
+    //
+    // The listener polls at 1 ms. A signal handler may not safely do anything but assign to a
+    // volatile sig_atomic_t, so "listening" for Ctrl+C is necessarily polling the flag the
+    // handler wrote, and this interval is what bounds how long the user waits to SEE the banner.
+    // It does NOT bound how long the search takes to STOP: the worker tests g_stop only at slice
+    // boundaries (multi-second at the default slices_per_launch), so the poll governs feedback
+    // latency, not shutdown latency. The progress line is gated on its own 1 s elapsed check, so
+    // raising the poll rate does not change how much this thread prints.
+    std::atomic<bool> g_stop{false};
+    std::atomic<bool> completed_all{false};
+    std::atomic<bool> launch_error{false};
+    cudaError_t worker_cuda_err = cudaSuccess;   // plain; published to main by tWorker.join()
+    static_assert(std::atomic<bool>::is_always_lock_free, "g_stop must be lock-free");
 
-        unsigned int zeroU = 0u;
-        ck(cudaMemcpyAsync(d_any_left, &zeroU, sizeof(unsigned int), cudaMemcpyHostToDevice, streamKernel), "zero d_any_left");
+    // NOTE: ck() calls std::exit() and MUST NOT be used inside tWorker -- std::exit from a
+    // spawned thread runs atexit handlers and static destructors, tearing down the statically
+    // linked CUDA runtime while main is still live. Every in-loop CUDA call below therefore
+    // captures its error into worker_cuda_err instead of exiting. ck() stays correct for the
+    // setup calls above, which all run on main before any thread exists.
+    auto worker = [&]() {
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            unsigned int zeroU = 0u;
+            cudaError_t e = cudaMemcpyAsync(d_any_left, &zeroU, sizeof(unsigned int), cudaMemcpyHostToDevice, streamKernel);
+            if (e != cudaSuccess) { worker_cuda_err = e; launch_error.store(true); break; }
 
-        kernel_point_add_and_check_oneinv<<<blocks, threadsPerBlock, 0, streamKernel>>>(
-            d_Px, d_Py, d_Rx, d_Ry,
-            d_start_scalars, d_counts256,
-            threadsTotal,
-            B,
-            slices_per_launch,
-            d_found_flag, d_found_result,
-            d_hashes_accum,
-            d_any_left
-        );
-        cudaError_t launchErr = cudaGetLastError();
-        if (launchErr != cudaSuccess) {
-            std::cerr << "\nKernel launch error: " << cudaGetErrorString(launchErr) << "\n";
-            stop_all = true;
+            kernel_point_add_and_check_oneinv<<<blocks, threadsPerBlock, 0, streamKernel>>>(
+                d_Px, d_Py, d_Rx, d_Ry,
+                d_start_scalars, d_counts256,
+                threadsTotal,
+                B,
+                slices_per_launch,
+                d_found_flag, d_found_result,
+                d_hashes_accum,
+                d_any_left
+            );
+            cudaError_t launchErr = cudaGetLastError();
+            if (launchErr != cudaSuccess) { worker_cuda_err = launchErr; launch_error.store(true); break; }
+
+            // Wait shape kept BYTE-FOR-BYTE as it was pre-split (query + 1 ms sleep, then the
+            // stream sync). This commit moves WHERE code runs, never HOW it waits -- swapping in
+            // a bare blocking cudaStreamSynchronize would change host busy-state and the
+            // resulting package-power shift would be misread as a threading effect.
+            bool found_now = false;
+            while (true) {
+                if (*(volatile int*)host_found == FOUND_READY) { found_now = true; break; }
+
+                cudaError_t qs = cudaStreamQuery(streamKernel);
+                if (qs == cudaSuccess) break;
+                if (qs != cudaErrorNotReady) {
+                    worker_cuda_err = qs; (void)cudaGetLastError();
+                    launch_error.store(true); found_now = true; break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            cudaError_t se = cudaStreamSynchronize(streamKernel);
+            if (se != cudaSuccess) { worker_cuda_err = se; launch_error.store(true); break; }
+
+            // Stop BEFORE the swap. One swap per COMPLETED launch is what keeps each thread's
+            // point in lockstep with its scalar; breaking out after a swap is the exact shape of
+            // the historical prefix-collision key-skip bug (fixed in PR#5).
+            //
+            // This tests g_stop and deliberately NOT g_sigint. Ctrl+C therefore reaches the
+            // worker only via tListener's 1 ms poll, i.e. up to 1 ms late. At the default
+            // slices_per_launch a launch is multi-second, so that is invisible; with a very
+            // small slice count an extra launch may complete before the stop lands (harmless --
+            // parity holds on each, so no key range is skipped). Reading g_sigint here would
+            // erase even that, but would let the worker set g_stop and exit before tListener had
+            // a chance to print the interrupt banner, which is the silent-exit defect this
+            // design exists to avoid. Latency is the cheaper cost.
+            if (found_now || g_stop.load(std::memory_order_relaxed)) break;
+
+            unsigned int h_any = 0u;
+            cudaError_t e2 = cudaMemcpy(&h_any, d_any_left, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+            if (e2 != cudaSuccess) { worker_cuda_err = e2; launch_error.store(true); break; }
+
+            std::swap(d_Px, d_Rx);
+            std::swap(d_Py, d_Ry);
+
+            if (h_any == 0u) { completed_all.store(true); break; }
         }
+        g_stop.store(true);   // wake tListener out of its poll loop on EVERY exit path
+    };
 
-        while (!stop_all) {
+    // tListener: SIGINT listener + reporter. Deliberately contains no CUDA call.
+    auto listener = [&]() {
+        auto tLast = t0;
+        unsigned long long lastHashes = 0ull;
+        const long double total_keys_ld = ld_from_u256(range_len);   // hoisted out of the print
+        bool announced_sigint = false;
+
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            // Sole g_sigint -> g_stop translation point in the program. Keeping it here (rather
+            // than also testing g_sigint in the worker) is what guarantees the banner prints
+            // exactly once: the worker cannot race ahead and stop the search silently.
+            if (g_sigint && !announced_sigint) {
+                announced_sigint = true;
+                std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
+                g_stop.store(true);
+            }
+
             auto now = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double>(now - tLast).count();
             if (dt >= 1.0) {
@@ -746,7 +870,6 @@ int main(int argc, char** argv) {
                 double delta = (double)(hashes_now - lastHashes);
                 double mkeys = delta / (dt * 1e6);
                 double elapsed = std::chrono::duration<double>(now - t0).count();
-                long double total_keys_ld = ld_from_u256(range_len);
                 long double prog = total_keys_ld > 0.0L ? ((long double)hashes_now / total_keys_ld) * 100.0L : 0.0L;
                 if (prog > 100.0L) prog = 100.0L;
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << elapsed
@@ -757,28 +880,23 @@ int main(int argc, char** argv) {
                 lastHashes = hashes_now; tLast = now;
             }
 
-            if (*(volatile int*)host_found == FOUND_READY) { stop_all = true; break; }
-
-            cudaError_t qs = cudaStreamQuery(streamKernel);
-            if (qs == cudaSuccess) break;
-            else if (qs != cudaErrorNotReady) { cudaGetLastError(); stop_all = true; break; }
-
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-
-        cudaStreamSynchronize(streamKernel);
         std::cout.flush();
-        if (stop_all || g_sigint) break;
+    };
 
-        unsigned int h_any = 0u;
-        ck(cudaMemcpy(&h_any, d_any_left, sizeof(unsigned int), cudaMemcpyDeviceToHost), "read any_left");
+    std::thread tWorker(worker);
+    std::thread tListener(listener);
 
-        std::swap(d_Px, d_Rx);
-        std::swap(d_Py, d_Ry);
+    // tWorker first: it is the thread that sets g_stop on every exit path, so tListener is
+    // guaranteed to be within one 1 ms poll of returning by the time this join lands. Joining
+    // in the other order would work too, but this way main is never blocked behind the thread
+    // that only prints.
+    tWorker.join();
+    tListener.join();
 
-        if (h_any == 0u) { completed_all = true; break; }
-    }
-
+    // MUST stay after the join. The worker's error-exit paths break out WITHOUT a stream sync,
+    // so device work may still be queued; this is what drains it before the frees below.
     cudaDeviceSynchronize();
     std::cout << "\n";
 
@@ -786,23 +904,30 @@ int main(int argc, char** argv) {
 
     int exit_code = EXIT_SUCCESS;
 
+    // Precedence: found > cuda-error > Ctrl+C > exhausted > terminated.
+    // The launch_error branch is NEW and fixes a real bug that predates this refactor: a kernel
+    // launch failure (or a cudaStreamQuery error) used to print at most a message, break the
+    // loop, and fall through to "TERMINATED" with exit_code still EXIT_SUCCESS -- i.e. a CUDA
+    // failure returned 0 and any script driving this binary saw a clean run.
     if (h_found_flag == FOUND_READY) {
         FoundResult host_result{};
         ck(cudaMemcpy(&host_result, d_found_result, sizeof(FoundResult), cudaMemcpyDeviceToHost), "read found_result");
         std::cout << "\n======== FOUND MATCH! =================================\n";
         std::cout << "Private Key   : " << formatHex256(host_result.scalar) << "\n";
         std::cout << "Public Key    : " << formatCompressedPubHex(host_result.Rx, host_result.Ry) << "\n";
+    } else if (launch_error.load()) {
+        std::cerr << "======== CUDA ERROR ===================================\n";
+        std::cerr << "Search aborted by a CUDA error: " << cudaGetErrorString(worker_cuda_err) << "\n";
+        exit_code = EXIT_FAILURE;
+    } else if (g_sigint) {
+        std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
+        std::cout << "Search was interrupted by user. Partial progress above.\n";
+        exit_code = 130;
+    } else if (completed_all.load()) {
+        std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
+        std::cout << "Target hash160 was not found within the specified range.\n";
     } else {
-        if (g_sigint) {
-            std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
-            std::cout << "Search was interrupted by user. Partial progress above.\n";
-            exit_code = 130;
-        } else if (completed_all) {
-            std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
-            std::cout << "Target hash160 was not found within the specified range.\n";
-        } else {
-            std::cout << "======== TERMINATED ===================================\n";
-        }
+        std::cout << "======== TERMINATED ===================================\n";
     }
 
     cudaFree(d_start_scalars); cudaFree(d_Px); cudaFree(d_Py); cudaFree(d_Rx); cudaFree(d_Ry);

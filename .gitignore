@@ -5,5 +5,14 @@
 /.vs
 
 # build artifacts (built on the GPU box, not committed)
+/CUDACyclone
 /CUDACyclone-ptxinfo
 /cyclone_tests_results.txt
+*.o
+
+# `make gate` scratch log (removed by the target itself; ignored so a failed/interrupted
+# run cannot leave an untracked file behind)
+/ptxas-gate.log
+
+# importing proof.py from a test script leaves this behind
+/__pycache__/

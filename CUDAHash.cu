@@ -22,8 +22,21 @@ __device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
     return a ^ b ^ c;
 }
 
-__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return xor3(ror32(x, 2), ror32(x, 13), ror32(x, 22)); }
-__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return xor3(ror32(x, 6), ror32(x, 11), ror32(x, 25)); }
+// Sigma0/Sigma1 with the common rotate hoisted OUT of the xor. Rotation is GF(2)-linear, so
+//     ror(a,k) ^ ror(b,k) ^ ror(c,k)  ==  ror(a ^ b ^ c, k)
+// and with k=2 / k=6 the inner amounts collapse to 13-2=11, 22-2=20 / 11-6=5, 25-6=19. This is
+// an identity, not an approximation: agreement on the 32 basis vectors is a COMPLETE proof over
+// all 2^32 inputs (host-checked, plus 500k random values and the usual edge set, 0 mismatches).
+//
+// WHY: instruction COUNT is unchanged (3 SHF + 1 LOP3 either way). The bet is placement -- the
+// surviving rotate now sits at the OUTSIDE of the expression, adjacent to the T1/T2 accumulation
+// in SHA_RND, where ptxas can fold it into the add as LEA.HI:
+//     {3 SHF, 1 LOP3, 1 IADD} -> {2 SHF, 1 LOP3, 1 LEA}   x 126 live sites
+// It only pays if LEA is NOT on the ~1/3-rate logic/shift unit that binds this kernel; two
+// independent reviews argued it is. SCREEN BEFORE BENCHING: `make sass | grep -c SHF` must drop
+// by ~126. If it does not, the fusion did not fire -- revert, spend no bench slot.
+__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(xor3(x, ror32(x, 11), ror32(x, 20)), 2); }
+__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(xor3(x, ror32(x,  5), ror32(x, 19)), 6); }
 __device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
 __device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
 
@@ -248,6 +261,30 @@ __device__ __forceinline__ void SHA256Transform(uint32_t state[8], const uint32_
 #define R42(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f2(b, c, d), x, 0x7A6D76E9ul, r)
 #define R52(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f1(b, c, d), x, 0, r)
 
+// FULL=false computes ONLY hash160 word 2 and skips the 7 rounds that cannot affect it.
+//
+// The final combine below is  h[2] = IV3 + e1 + a2.  Tracing the name rotation (each round
+// writes its `a` slot and rotates its `c` slot by 10), `e1` is last WRITTEN at round 76 and
+// only ROL10'd afterwards (at round 78); `a2` is last written at round 75 and only ROL10'd
+// afterwards (at round 77). So h[2] == IV3 + ROL(e1@76,10) + ROL(a2@75,10), and line-1 rounds
+// 77/78/79 plus line-2 rounds 76/77/78/79 are dead apart from those two rotates -- 153 of 160
+// rounds, i.e. 7*(1 LOP3 + 2 SHF) - 2 SHF = 19 fewer ops on the sm_120 logic/shift pipe that
+// binds this kernel, plus 8 IADDs from the collapsed combine.
+//
+// Word 2 is the CHEAPEST of the five: h[0] needs line 1 through round 78, h[1] through 77,
+// h[2] only through 76. Any of the five is an equally selective 32-bit filter, so the hot path
+// takes the cheap one and the ~2^-32 rare path recomputes the full digest (getHash160_33_*).
+//
+// VERIFIED BIT-EXACT: getHash160_w2_from_limbs() == getHash160_33_from_limbs().w[2] over 2e6
+// random x + both prefixes, plus the 02||Gx known-answer test (hash160 751e76e8...f1433bd6);
+// separately, 3e6 random/edge blocks through both instantiations of this transform. Method:
+// compile THIS FILE on the host with -D__device__= -D__forceinline__=inline -D__noinline__=
+// and stubs for __byte_perm/__funnelshift_r, then compare the two entry points.
+//
+// RE-RUN THAT CHECK IF THE ROUND LIST BELOW IS EVER EDITED. The trim's correctness rests on
+// WHERE each register is last written, not on the digest being right: move a round and the
+// FULL path can still be a correct RIPEMD-160 while word 2 silently stops matching it.
+template<bool FULL>
 __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
 {
     uint32_t u;
@@ -410,7 +447,8 @@ __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
 	R52(b2, c2, d2, e2, a2, w[13], 6);
 	R51(a1, b1, c1, d1, e1, w[8], 14);
 	R52(a2, b2, c2, d2, e2, w[14], 5);
-	R51(e1, a1, b1, c1, d1, w[11], 11);
+	R51(e1, a1, b1, c1, d1, w[11], 11);   // t=76: LAST write of e1
+    if constexpr (FULL) {
 	R52(e2, a2, b2, c2, d2, w[0], 15);
 	R51(d1, e1, a1, b1, c1, w[6], 8);
 	R52(d2, e2, a2, b2, c2, w[3], 13);
@@ -418,13 +456,21 @@ __device__ __forceinline__ void RIPEMD160Transform(uint32_t s[5], uint32_t* w)
 	R52(c2, d2, e2, a2, b2, w[9], 11);
 	R51(b1, c1, d1, e1, a1, w[13], 6);
 	R52(b2, c2, d2, e2, a2, w[11], 11);
+    } else {
+        a2 = ROL(a2, 10);   // sole surviving effect of line-2 round 77 (its c slot is a2)
+        e1 = ROL(e1, 10);   // sole surviving effect of line-1 round 78 (its c slot is e1)
+    }
 
-    uint32_t t = s[0];
-    s[0] = s[1] + c1 + d2;
-    s[1] = s[2] + d1 + e2;
-    s[2] = s[3] + e1 + a2;
-    s[3] = s[4] + a1 + b2;
-    s[4] = t + b1 + c2;
+    if constexpr (FULL) {
+        uint32_t t = s[0];
+        s[0] = s[1] + c1 + d2;
+        s[1] = s[2] + d1 + e2;
+        s[2] = s[3] + e1 + a2;
+        s[3] = s[4] + a1 + b2;
+        s[4] = t + b1 + c2;
+    } else {
+        s[2] = s[3] + e1 + a2;   // s[3] still holds the IV3 seed; s[0]/s[1]/s[4] left untouched
+    }
 }
 
 
@@ -473,13 +519,35 @@ __device__ __forceinline__ void SHA256_33_from_limbs(uint8_t prefix02_03, const 
     out_state[4]=bswap32(st[4]); out_state[5]=bswap32(st[5]); out_state[6]=bswap32(st[6]); out_state[7]=bswap32(st[7]);
 }
 
+// The 16-word RIPEMD-160 block is the 8 SHA-256 words plus a compile-time-constant tail.
+// Both entry points below share it; keep the two padding writes identical.
+#define RIPEMD160_PAD_TAIL(w) do { \
+    (w)[8]  = 0x00000080u; \
+    (w)[9]=0u; (w)[10]=0u; (w)[11]=0u; (w)[12]=0u; (w)[13]=0u; \
+    (w)[14] = 256u; \
+    (w)[15] = 0u; \
+} while (0)
+
+// Hot path: hash160 word 2 only, via the 153-round RIPEMD160Transform<false>. Returning one
+// u32 instead of a 5-word H160 also narrows the by-value ABI at the __noinline__ boundary --
+// see CUDAHash.cuh for why that boundary's register cost is worth watching.
+__device__ __forceinline__ uint32_t RIPEMD160_w2_from_SHA256_state(uint32_t sha_state_le[16])
+{
+    RIPEMD160_PAD_TAIL(sha_state_le);
+    uint32_t s[5];
+    s[0] = 0x67452301u;
+    s[1] = 0xEFCDAB89u;
+    s[2] = 0x98BADCFEu;
+    s[3] = 0x10325476u;   // IV3: the only seed word the trimmed combine reads
+    s[4] = 0xC3D2E1F0u;
+    RIPEMD160Transform<false>(s, sha_state_le);
+    return s[2];          // s[0]/s[1]/s[3]/s[4] are dead here and DCE away
+}
+
 __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_le[16],
                                                             uint32_t out5[5])
 {
-    sha_state_le[8]  = 0x00000080u;
-    sha_state_le[9]=0u; sha_state_le[10]=0u; sha_state_le[11]=0u; sha_state_le[12]=0u; sha_state_le[13]=0u;
-    sha_state_le[14] = 256u;
-    sha_state_le[15] = 0u;
+    RIPEMD160_PAD_TAIL(sha_state_le);
 
     // RIPEMD-160 IV as literals, written straight into out5 — which doubles as the
     // RIPEMD state. RIPEMD160Transform reads these at entry, leaves them untouched
@@ -491,12 +559,23 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
     out5[2] = 0x98BADCFEu;
     out5[3] = 0x10325476u;
     out5[4] = 0xC3D2E1F0u;
-    RIPEMD160Transform(out5, sha_state_le);
+    RIPEMD160Transform<true>(out5, sha_state_le);
+}
+
+// HOT PATH. Same by-value ABI, but the result is one u32 (hash160 word 2) instead of five,
+// and the RIPEMD-160 inside is the 153-round trim. This is the ONLY hash call on the scanning
+// path; getHash160_33_from_limbs below runs only after a 32-bit filter hit (~2^-32).
+__device__ __noinline__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
+{
+    uint32_t sha_state[16];
+    SHA256_33_from_limbs(prefix02_03, x.v, sha_state);
+    return RIPEMD160_w2_from_SHA256_state(sha_state);
 }
 
 // BY-VALUE ABI (x in by value, hash160 out by value) -- see CUDAHash.cuh for the measured effect
 // and why this must not be reverted to pointers. __noinline__ is deliberate: the CALL is kept,
 // only its ABI changed. The body is unchanged from the pointer version, so the hash is bit-exact.
+// COLD PATH ONLY since the word-2 filter landed: called under `pref &&`, i.e. ~2^-32 of keys.
 __device__ __noinline__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x)
 {
     uint32_t sha_state[16];
