@@ -1,10 +1,7 @@
-// Host-side emulation of the PTX primitives the field math is written against, so the
-// shipped device code can be compiled and executed by a plain C++ compiler with no GPU.
-//
-// CC.CF is a single sticky condition-code bit. Ops suffixed .cc WRITE it; ops prefixed
-// addc/madc READ it; a plain addc.u32 (no .cc) reads but does not write. Every macro
-// stages its result in a temp first, because the shipped code freely aliases destination
-// and source (e.g. mad_lo_cc(e[0], a[0], b[0], e[0])).
+// Host emulation of the PTX primitives the field math is written against, so the shipped
+// device code runs under a plain C++ compiler. CC.CF is one sticky bit: .cc ops write it,
+// addc/madc read it, plain addc reads only. Results stage through a temp because the
+// shipped code aliases destination and source (e.g. mad_lo_cc(e[0], a[0], b[0], e[0])).
 #pragma once
 
 #include <cstdint>

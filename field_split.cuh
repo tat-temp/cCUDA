@@ -1,50 +1,16 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// field_split.cuh -- split-column fused-MAC 256x256 -> 512 product cores for the secp256k1
+// field multiply/square. The "fast mod P" reduction tail below is RCKangaroo's, verbatim.
 //
-// field_split.cuh -- split-column fused-MAC 256x256 -> 512 product cores for the
-// secp256k1 field multiply/square, as a drop-in replacement for the 512-bit product
-// core inside RCKangaroo's MulModP / SqrModP.
+// Blackwell fuses an adjacent mad.lo.cc.u32 / madc.hi.cc.u32 pair into one IMAD.WIDE.U32.X, but
+// only when the accumulator pair is 64-bit ALIGNED. Splitting the limb products by column parity
+// (even -> e[], odd -> o[], then p = e + (o << 32)) makes every pair aligned so the fusion sticks;
+// the wide-multiply count is unchanged, the carry plumbing around it is what drops.
 //
-// WHAT CHANGES
-//   Only the 512-bit PRODUCT CORE. The "fast mod P" reduction tail below is copied
-//   verbatim from third_party/RCKangaroo/RCGpuUtils.h (MulModP and SqrModP carry a
-//   byte-identical tail), so MulModP_split/SqrModP_split return the exact same lazy
-//   representative as the originals -- not merely a congruent one. That equality is
-//   the correctness gate: see tests/field_split_equiv.cpp, which replays both cores
-//   on the host over random + edge inputs and requires bit-for-bit agreement.
-//
-// WHY IT IS FASTER
-//   Blackwell fuses an adjacent mad.lo.cc.u32 / madc.hi.cc.u32 pair into a single
-//   IMAD.WIDE.U32.X (32x32 multiply + 64-bit accumulate + carry in/out), but only when
-//   the accumulator pair is 64-bit ALIGNED. RCKangaroo's core accumulates through
-//   mul_256_by_64 + add_320_to_256, whose accumulator pairs straddle that alignment, so
-//   ptxas drops the fusion and re-expands the chain into separate IMAD + IADD3.X. The
-//   alignment precondition is why the earlier naive "rewrite the carry-adds as mad.cc"
-//   attempt measured a flat IADD3 delta: the instructions were right, the operand
-//   alignment was not.
-//
-//   Splitting the limb products by column PARITY -- even columns accumulate into e[],
-//   odd into o[], then p = e + (o << 32) -- makes every accumulator pair aligned, so
-//   every fusion sticks. The wide-multiply COUNT is unchanged; what drops is the carry
-//   plumbing around it. Upstream measured 9776 -> 8176 SASS instructions on its own
-//   kernel, registers 124 -> 118, still 0 spill.
-//
-// PROVENANCE
-//   Ported from tat-temp/cCUDAm branch f5, commit 9671279 ("Split-column fused-MAC
-//   cores for mul_mod and sqr_mod"). That tree's mul_mod/sqr_mod are RCKangaroo's
-//   MulModP/SqrModP with this same core swap, so the port is one-to-one. The cores are
-//   GENERATED -- do not hand-edit between the markers; see tools/fieldmath/README.md.
-//
-// USAGE
-//   Included by ec_backend.cuh AFTER third_party/RCKangaroo/RCGpuUtils.h, inside
-//   namespace rck (it uses that header's u32/u64 typedefs, PTX macros and P_INV32).
-//   Selected by -DFIELD_SPLIT=1 (default on); -DFIELD_SPLIT=0 restores RCKangaroo's
-//   cores so both arms can be built from one branch for a SASS diff.
+// Ported from tat-temp/cCUDAm@9671279 (branch f5). Cores are GENERATED -- do not hand-edit
+// between the markers; see tools/fieldmath/README.md. Correctness: `make fieldtest`.
 #pragma once
 
-// The generated cores are emitted against short macro names (upstream's spelling).
-// Alias them onto the _32 macros RCGpuUtils.h already defines rather than re-declaring
-// the asm, so there is exactly one definition of each PTX primitive in the build.
-// Undefined at the bottom of this header to keep them from leaking.
+// Alias upstream's macro spelling onto the _32 macros RCGpuUtils.h already defines.
 #define mad_lo_cc(res, a, b, c)   mad_lo_cc_32(res, a, b, c)
 #define madc_hi_cc(res, a, b, c)  madc_hi_cc_32(res, a, b, c)
 #define madc_lo_cc(res, a, b, c)  madc_lo_cc_32(res, a, b, c)
@@ -339,8 +305,7 @@ __device__ __forceinline__ void sqr512_split(uint32_t* p, const uint32_t* a)
 }
 // ---- END GENERATED ----
 
-// r = a * b (mod P). Product core is mul512_split; everything from "fast mod P" down is
-// RCKangaroo's MulModP tail, unchanged.
+// r = a * b (mod P)
 __device__ __forceinline__ void MulModP_split(u64* res, u64* val1, u64* val2)
 {
 	u64 buff[8], tmp[5], tmp2[2], tmp3;
@@ -371,8 +336,7 @@ __device__ __forceinline__ void MulModP_split(u64* res, u64* val1, u64* val2)
 	addc_64(res[3], buff[3], 0ull);
 }
 
-// r = a^2 (mod P). Product core is sqr512_split; tail is RCKangaroo's SqrModP tail,
-// which is byte-identical to the MulModP tail above.
+// r = a^2 (mod P)
 __device__ __forceinline__ void SqrModP_split(u64* res, u64* val)
 {
 	u64 buff[8], tmp[5], tmp2[2], tmp3;
