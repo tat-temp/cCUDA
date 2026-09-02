@@ -48,6 +48,18 @@ typedef char               i8;
 // namespaced — but their names do not collide with CUDAMath.h's (UADDO/MADDC/...).
 #include "third_party/RCKangaroo/RCGpuUtils.h"
 
+// Split-column fused-MAC product cores (see field_split.cuh). FIELD_SPLIT=1 routes rmul/rsqr
+// through MulModP_split/SqrModP_split, which keep RCKangaroo's reduction tail verbatim and so
+// return the bit-identical lazy representative -- the representation contract documented above
+// is unchanged either way. -DFIELD_SPLIT=0 restores RCKangaroo's own cores, so both arms can be
+// built from one branch for a SASS diff.
+#ifndef FIELD_SPLIT
+#define FIELD_SPLIT 1
+#endif
+#if FIELD_SPLIT
+#include "field_split.cuh"
+#endif
+
 // Fully reduce a lazily-reduced value r in [0,2^256) to canonical [0,P). Because
 // r < 2^256 < 2P, a single conditional subtract of P suffices.
 __device__ __forceinline__ void field_canon(u64* r)
@@ -66,7 +78,11 @@ __device__ __forceinline__ void field_canon(u64* r)
 // r = a * b (mod P)
 __device__ __forceinline__ void rmul(uint64_t* r, const uint64_t* a, const uint64_t* b)
 {
+#if FIELD_SPLIT
+    MulModP_split((u64*)r, (u64*)a, (u64*)b);
+#else
     MulModP((u64*)r, (u64*)a, (u64*)b);
+#endif
 #ifdef RCK_CANON
     field_canon((u64*)r);
 #endif
@@ -75,7 +91,11 @@ __device__ __forceinline__ void rmul(uint64_t* r, const uint64_t* a, const uint6
 // r = r * a (mod P)  (2-arg form used by CUDACyclone's `_ModMult(inverse, subp[0])`)
 __device__ __forceinline__ void rmul(uint64_t* r, const uint64_t* a)
 {
+#if FIELD_SPLIT
+    MulModP_split((u64*)r, (u64*)r, (u64*)a);
+#else
     MulModP((u64*)r, (u64*)r, (u64*)a);
+#endif
 #ifdef RCK_CANON
     field_canon((u64*)r);
 #endif
@@ -84,7 +104,11 @@ __device__ __forceinline__ void rmul(uint64_t* r, const uint64_t* a)
 // r = a^2 (mod P)
 __device__ __forceinline__ void rsqr(uint64_t* r, const uint64_t* a)
 {
+#if FIELD_SPLIT
+    SqrModP_split((u64*)r, (u64*)a);
+#else
     SqrModP((u64*)r, (u64*)a);
+#endif
 #ifdef RCK_CANON
     field_canon((u64*)r);
 #endif

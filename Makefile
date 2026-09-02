@@ -18,7 +18,7 @@ GPU_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/
 # while `make ptxinfo`/`gate` fail loudly on a malformed "-gencode arch=compute_,code=sm_".
 # i.e. the thing that ships wrong succeeds and the diagnostic errors. Guarded so targets
 # that need no compiler still work on a GPU-less box.
-NOARCH_OK := clean
+NOARCH_OK := clean fieldtest
 ifneq ($(filter-out $(NOARCH_OK),$(or $(MAKECMDGOALS),all)),)
   ifeq ($(strip $(GPU_ARCH)),)
     $(error could not detect GPU compute capability (nvidia-smi missing, off PATH, or returned nothing). Pass it explicitly: make GPU_ARCH=120)
@@ -50,7 +50,7 @@ CXXFLAGS   := -std=c++17 -Xcompiler -pthread
 
 LDFLAGS    := -cudart=static -Xcompiler -pthread
 
-.PHONY: all clean ptxinfo gate sass resusage
+.PHONY: all clean ptxinfo gate sass resusage fieldtest
 
 all: $(TARGET)
 
@@ -132,6 +132,28 @@ gate: $(SRC) $(HDRS) CUDAHash.cu
 	 echo "  ok: $(HOT_KERNEL) uses $$regs registers (ceiling $(REG_CEILING))"
 	@echo "GATE PASS"
 
+# ---- Field-math equivalence gate (host-only: no GPU, no nvcc) -------------------------
+# Proves the split-column cores in field_split.cuh are BIT-IDENTICAL to the RCKangaroo
+# cores they replace, by compiling the shipped function bodies against a host emulation of
+# the PTX carry primitives. Runs anywhere a C++ compiler exists, so it gates the port
+# before a GPU box is ever rented -- and unlike proof.py it isolates the field math, so a
+# failure points straight at the multiply rather than at the whole pipeline.
+#
+# Bit-equality (not just congruence) is the right bar here: the two paths share a
+# byte-identical reduction tail, so equal 512-bit products mean the split path emits the
+# same lazy representative and nothing downstream can observe the swap.
+PYTHON          ?= python3
+HOSTCXX         ?= g++
+FIELDTEST_ITERS ?= 2000000
+
+fieldtest: tests/field_split_equiv.cpp tests/field_split_include.cpp field_split.cuh \
+           tests/ptx_host.h tests/extract_field.py third_party/RCKangaroo/RCGpuUtils.h
+	$(PYTHON) tests/extract_field.py
+	$(HOSTCXX) -O2 -fno-strict-aliasing -I tests -o tests/field_split_include tests/field_split_include.cpp
+	$(HOSTCXX) -O2 -fno-strict-aliasing -I tests -o tests/field_split_equiv   tests/field_split_equiv.cpp
+	./tests/field_split_include
+	./tests/field_split_equiv $(FIELDTEST_ITERS)
+
 # Per-kernel resource usage read back from the built fat binary (authoritative).
 resusage: $(TARGET)
 	cuobjdump -res-usage $(TARGET)
@@ -142,3 +164,5 @@ sass: $(TARGET)
 
 clean:
 	rm -f $(TARGET) CUDACyclone-ptxinfo $(GATE_LOG) $(OBJ)
+	rm -f tests/field_split_equiv tests/field_split_include
+	rm -f tests/field_split_equiv.exe tests/field_split_include.exe
