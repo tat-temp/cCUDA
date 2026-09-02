@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (see LICENSE; default build links GPLv3 RCKangaroo)
 //
-// Field-arithmetic backend. _ModMult / _ModSqr use the split-column product cores in
-// field_split.cuh over RetiredCoder's reduction tail; _ModInv is his safegcd InvModP
-// (third_party/RCKangaroo/, GPLv3). See ec_backend.cuh and LICENSE.
+// Field-arithmetic backend: split-column product cores over RetiredCoder's reduction tail,
+// plus his safegcd InvModP (third_party/RCKangaroo/, GPLv3). See ec_backend.cuh and LICENSE.
 #include "ec_backend.cuh"
 
 

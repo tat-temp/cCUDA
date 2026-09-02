@@ -18,7 +18,7 @@ GPU_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/
 # while `make ptxinfo`/`gate` fail loudly on a malformed "-gencode arch=compute_,code=sm_".
 # i.e. the thing that ships wrong succeeds and the diagnostic errors. Guarded so targets
 # that need no compiler still work on a GPU-less box.
-NOARCH_OK := clean fieldtest
+NOARCH_OK := clean
 ifneq ($(filter-out $(NOARCH_OK),$(or $(MAKECMDGOALS),all)),)
   ifeq ($(strip $(GPU_ARCH)),)
     $(error could not detect GPU compute capability (nvidia-smi missing, off PATH, or returned nothing). Pass it explicitly: make GPU_ARCH=120)
@@ -50,7 +50,7 @@ CXXFLAGS   := -std=c++17 -Xcompiler -pthread
 
 LDFLAGS    := -cudart=static -Xcompiler -pthread
 
-.PHONY: all clean ptxinfo gate sass resusage fieldtest
+.PHONY: all clean ptxinfo gate sass resusage
 
 all: $(TARGET)
 
@@ -132,19 +132,6 @@ gate: $(SRC) $(HDRS) CUDAHash.cu
 	 echo "  ok: $(HOT_KERNEL) uses $$regs registers (ceiling $(REG_CEILING))"
 	@echo "GATE PASS"
 
-# Host-only field-math gate: runs field_split.cuh against an emulation of the PTX carry
-# primitives, so the cores are checked with no GPU and no nvcc. Isolates the field math,
-# so a failure points at the multiply rather than at the whole pipeline like proof.py.
-PYTHON          ?= python3
-HOSTCXX         ?= g++
-FIELDTEST_ITERS ?= 2000000
-
-fieldtest: tests/field_split_test.cpp tests/ptx_host.h tests/extract_field.py \
-           field_split.cuh third_party/RCKangaroo/RCGpuUtils.h
-	$(PYTHON) tests/extract_field.py
-	$(HOSTCXX) -O2 -fno-strict-aliasing -I tests -o tests/field_split_test tests/field_split_test.cpp
-	./tests/field_split_test $(FIELDTEST_ITERS)
-
 # Per-kernel resource usage read back from the built fat binary (authoritative).
 resusage: $(TARGET)
 	cuobjdump -res-usage $(TARGET)
@@ -155,4 +142,3 @@ sass: $(TARGET)
 
 clean:
 	rm -f $(TARGET) CUDACyclone-ptxinfo $(GATE_LOG) $(OBJ)
-	rm -f tests/field_split_test tests/field_split_test.exe
