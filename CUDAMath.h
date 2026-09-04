@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (see LICENSE; default build links GPLv3 RCKangaroo)
 //
-// Field-arithmetic backend. The secp256k1 field ops (_ModMult / _ModSqr / _ModInv) are
-// RetiredCoder's RCKangaroo implementations (32-bit-limb MulModP/SqrModP + safegcd InvModP,
-// third_party/RCKangaroo/, GPLv3) -- measured ~+8.5% end-to-end on RTX 5090 over the older
-// JeanLucPons-lineage field math this project used to carry (removed). See ec_backend.cuh
-// and LICENSE.
+// Field-arithmetic backend: split-column product cores over RetiredCoder's reduction tail,
+// plus his safegcd InvModP (third_party/RCKangaroo/, GPLv3). See ec_backend.cuh and LICENSE.
 #include "ec_backend.cuh"
 
 
