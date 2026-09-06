@@ -149,9 +149,17 @@ __global__ void kernel_point_add_and_check_oneinv(
 
         // rem >= 2^64 means far more batches than max_batches_per_launch could ever allow;
         // otherwise this thread can run floor(rem / B) full batches.
+        //
+        // SHIFT, NOT DIVIDE. B is always a power of two -- the host rejects anything else where
+        // --grid is parsed (the is_pow2 check) -- but it arrives as a RUNTIME parameter, so the
+        // compiler cannot know that and `rem0[0] / (uint64_t)B` emits a full 64-bit software
+        // divide: tens of instructions, once per thread at entry. That is cheap when a launch
+        // runs many batches per thread and NOT cheap in the documented ncu profiling geometry,
+        // which is deliberately 1 batch/thread -- i.e. it would land squarely in the profile.
+        // __ffs(B)-1 is log2(B) in one instruction.
         batches_limit = max_batches_per_launch;
         if ((rem0[1] | rem0[2] | rem0[3]) == 0ull) {
-            uint64_t avail = rem0[0] / (uint64_t)B;
+            uint64_t avail = rem0[0] >> (__ffs(B) - 1);
             if (avail < (uint64_t)batches_limit) batches_limit = (uint32_t)avail;
         }
     }

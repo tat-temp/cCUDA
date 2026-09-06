@@ -46,6 +46,17 @@ static inline unsigned int __funnelshift_r(unsigned int lo, unsigned int hi, uns
     return (unsigned int)(v >> (sh & 31));
 }
 
+// CUDA's __ffs: 1-based index of the least significant set bit, 0 for an argument of 0.
+// The kernel uses it as log2(B)+1 on a power-of-two batch size, so the differential must model
+// it exactly -- an off-by-one here would silently change every thread's batch count.
+static inline int __ffs(int x)
+{
+    if (x == 0) return 0;
+    int n = 1;
+    while ((x & 1) == 0) { x >>= 1; ++n; }
+    return n;
+}
+
 #include "CUDAHash.cu"
 
 #define WARP_SIZE 32
