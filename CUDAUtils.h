@@ -106,6 +106,17 @@ __device__ __forceinline__ void sub256_u64_inplace(uint64_t a[4], uint64_t dec) 
     { uint64_t ai = a[3]; a[3] = ai - borrow; borrow = (ai < borrow) ? 1ull : 0ull; }
 }
 
+// Counterpart of sub256_u64_inplace. Rebuilds the running scalar from the kernel's untouched
+// start_scalars input plus batches_done*B, so S[4] need not occupy registers across the loop.
+__device__ __forceinline__ void add256_u64_inplace(uint64_t a[4], uint64_t inc) {
+    uint64_t old = a[0];
+    a[0] = old + inc;
+    uint64_t carry = (a[0] < old) ? 1ull : 0ull;
+    { uint64_t ai = a[1]; a[1] = ai + carry; carry = (a[1] < ai) ? 1ull : 0ull; }
+    { uint64_t ai = a[2]; a[2] = ai + carry; carry = (a[2] < ai) ? 1ull : 0ull; }
+    { uint64_t ai = a[3]; a[3] = ai + carry; carry = (a[3] < ai) ? 1ull : 0ull; }
+}
+
 __device__ __forceinline__ unsigned long long warp_reduce_add_ull(unsigned long long v) {
     unsigned mask = 0xFFFFFFFFu;
     v += __shfl_down_sync(mask, v, 16);

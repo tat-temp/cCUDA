@@ -108,28 +108,68 @@ __global__ void kernel_point_add_and_check_oneinv(
     } while (0)
     #define MAYBE_WARP_FLUSH() do { if ((local_hashes & (FLUSH_THRESHOLD - 1u)) == 0u) WARP_FLUSH_HASHES(); } while (0)
 
-    uint64_t x1[4], y1[4], S[4];
-    { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; S[0] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; S[1] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; S[2] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; S[3] = start_scalars[idx]; }
-    uint64_t rem[4];
-    rem[0] = counts256[gid*4 + 0];
-    rem[1] = counts256[gid*4 + 1];
-    rem[2] = counts256[gid*4 + 2];
-    rem[3] = counts256[gid*4 + 3];
+    uint64_t x1[4], y1[4];
+    { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; }
+    { const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; }
+    { const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; }
+    { const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; }
 
-    if ((rem[0]|rem[1]|rem[2]|rem[3]) == 0ull) {
-        Rx[gid*4+0] = x1[0]; Ry[gid*4+0] = y1[0];
-        Rx[gid*4+1] = x1[1]; Ry[gid*4+1] = y1[1];
-        Rx[gid*4+2] = x1[2]; Ry[gid*4+2] = y1[2];
-        Rx[gid*4+3] = x1[3]; Ry[gid*4+3] = y1[3];
-        WARP_FLUSH_HASHES(); return;
+    // REGISTER DISCIPLINE. Neither the running scalar S[4] nor the running remainder rem[4] is
+    // kept in registers any more. Together they cost 16 registers across the whole batch loop
+    // while being read almost nowhere -- S only at the four found sites and at exit, rem only in
+    // the loop condition and at exit. This kernel runs against a HARD 128-register ceiling
+    // (__launch_bounds__(256,2)) and sits within a few registers of it, so 16 registers of pure
+    // bookkeeping is the difference between headroom and spill for anything added later. It was
+    // found while chasing a spill on an experimental branch, where dropping these two took the
+    // hot kernel from 48/44 bytes of spill down to 16/16; that experiment was abandoned for
+    // unrelated reasons, but the bookkeeping was always dead weight and is worth removing here
+    // on its own. What this buys on THIS branch is headroom, so read it off `make gate`.
+    //
+    // Both are exactly reconstructible, because the kernel does not modify start_scalars or
+    // counts256 until its exit write:
+    //     S_now   = start_scalars[gid*4..] + batches_done * B
+    //     rem_now = counts256[gid*4..]     - batches_done * B
+    // That also collapses the per-batch ge256_u64(rem, B) test to a plain uint32 compare, and
+    // deletes a 4-limb add plus a 4-limb subtract per batch.
+    uint32_t batches_limit;
+    {
+        uint64_t rem0[4];   // scoped: must be dead before the loop, or it costs the 8 registers
+        rem0[0] = counts256[gid*4 + 0];
+        rem0[1] = counts256[gid*4 + 1];
+        rem0[2] = counts256[gid*4 + 2];
+        rem0[3] = counts256[gid*4 + 3];
+
+        if ((rem0[0]|rem0[1]|rem0[2]|rem0[3]) == 0ull) {
+            Rx[gid*4+0] = x1[0]; Ry[gid*4+0] = y1[0];
+            Rx[gid*4+1] = x1[1]; Ry[gid*4+1] = y1[1];
+            Rx[gid*4+2] = x1[2]; Ry[gid*4+2] = y1[2];
+            Rx[gid*4+3] = x1[3]; Ry[gid*4+3] = y1[3];
+            WARP_FLUSH_HASHES(); return;
+        }
+
+        // rem >= 2^64 means far more batches than max_batches_per_launch could ever allow;
+        // otherwise this thread can run floor(rem / B) full batches.
+        batches_limit = max_batches_per_launch;
+        if ((rem0[1] | rem0[2] | rem0[3]) == 0ull) {
+            uint64_t avail = rem0[0] / (uint64_t)B;
+            if (avail < (uint64_t)batches_limit) batches_limit = (uint32_t)avail;
+        }
     }
 
     uint32_t batches_done = 0;
 
-    while (batches_done < max_batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
+    // Materialise the batch-centre scalar on demand. The volatile read is LOAD-BEARING: without
+    // it LICM is free to hoist this loop-invariant load into the loop preheader and re-materialise
+    // the very 8 registers this exists to free. It sits only on found paths and at exit, so the
+    // forced load costs nothing. Confirm with `make gate`, not by reading the source.
+    #define LOAD_CENTER_SCALAR(dst) do { \
+        const volatile uint64_t* _ssp = (const volatile uint64_t*)start_scalars; \
+        (dst)[0] = _ssp[gid*4+0]; (dst)[1] = _ssp[gid*4+1]; \
+        (dst)[2] = _ssp[gid*4+2]; (dst)[3] = _ssp[gid*4+3]; \
+        add256_u64_inplace((dst), (uint64_t)batches_done * (uint64_t)B); \
+    } while (0)
+
+    while (batches_done < batches_limit) {
         {
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
             uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
@@ -138,7 +178,8 @@ __global__ void kernel_point_add_and_check_oneinv(
                 bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                        d_found_result->scalar[0]=S[0]; d_found_result->scalar[1]=S[1]; d_found_result->scalar[2]=S[2]; d_found_result->scalar[3]=S[3];
+                        uint64_t fs[4]; LOAD_CENTER_SCALAR(fs);
+                        d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
                         d_found_result->Rx[0]=x1[0]; d_found_result->Rx[1]=x1[1]; d_found_result->Rx[2]=x1[2]; d_found_result->Rx[3]=x1[3];
                         d_found_result->Ry[0]=y1[0]; d_found_result->Ry[1]=y1[1]; d_found_result->Ry[2]=y1[2]; d_found_result->Ry[3]=y1[3];
                         __threadfence_system();
@@ -204,7 +245,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                     bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
+                            uint64_t fs[4]; LOAD_CENTER_SCALAR(fs);
                             uint64_t addv=(uint64_t)(i+1);
                             { uint64_t old=fs[0]; fs[0]=old+addv; addv=(fs[0]<old)?1ull:0ull; }
                             { uint64_t old=fs[1]; fs[1]=old+addv; addv=(fs[1]<old)?1ull:0ull; }
@@ -248,7 +289,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                     bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                     if (full) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
+                            uint64_t fs[4]; LOAD_CENTER_SCALAR(fs);
                             uint64_t sub=(uint64_t)(i+1);
                             { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
                             { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
@@ -300,7 +341,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                 bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
                 if (full) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                        uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
+                        uint64_t fs[4]; LOAD_CENTER_SCALAR(fs);
                         uint64_t sub=(uint64_t)half;
                         { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
                         { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
@@ -345,23 +386,26 @@ __global__ void kernel_point_add_and_check_oneinv(
             x1[3] = x3[3]; y1[3] = y3[3];
         }
 
-        {
-            uint64_t addv=(uint64_t)B;
-            { uint64_t old=S[0]; S[0]=old+addv; addv=(S[0]<old)?1ull:0ull; }
-            { uint64_t old=S[1]; S[1]=old+addv; addv=(S[1]<old)?1ull:0ull; }
-            { uint64_t old=S[2]; S[2]=old+addv; addv=(S[2]<old)?1ull:0ull; }
-            { uint64_t old=S[3]; S[3]=old+addv; addv=(S[3]<old)?1ull:0ull; }
-            sub256_u64_inplace(rem, (uint64_t)B);
-        }
+        // S and rem are derived from batches_done now -- nothing to advance here.
         local_hashes += (unsigned int)B; MAYBE_WARP_FLUSH();  // count the whole batch at once (B | 65536 keeps the 64Ki flush cadence)
         ++batches_done;
     }
 
-    Rx[gid*4+0] = x1[0]; Ry[gid*4+0] = y1[0]; counts256[gid*4+0] = rem[0]; start_scalars[gid*4+0] = S[0];
-    Rx[gid*4+1] = x1[1]; Ry[gid*4+1] = y1[1]; counts256[gid*4+1] = rem[1]; start_scalars[gid*4+1] = S[1];
-    Rx[gid*4+2] = x1[2]; Ry[gid*4+2] = y1[2]; counts256[gid*4+2] = rem[2]; start_scalars[gid*4+2] = S[2];
-    Rx[gid*4+3] = x1[3]; Ry[gid*4+3] = y1[3]; counts256[gid*4+3] = rem[3]; start_scalars[gid*4+3] = S[3];
-    if ((rem[0] | rem[1] | rem[2] | rem[3]) != 0ull) {
+    // Rebuild both derived values once, here, then write back. Read before write: these loads
+    // still see this launch's untouched inputs.
+    uint64_t Sf[4]; LOAD_CENTER_SCALAR(Sf);
+    uint64_t rf[4];
+    rf[0] = counts256[gid*4 + 0];
+    rf[1] = counts256[gid*4 + 1];
+    rf[2] = counts256[gid*4 + 2];
+    rf[3] = counts256[gid*4 + 3];
+    sub256_u64_inplace(rf, (uint64_t)batches_done * (uint64_t)B);
+
+    Rx[gid*4+0] = x1[0]; Ry[gid*4+0] = y1[0]; counts256[gid*4+0] = rf[0]; start_scalars[gid*4+0] = Sf[0];
+    Rx[gid*4+1] = x1[1]; Ry[gid*4+1] = y1[1]; counts256[gid*4+1] = rf[1]; start_scalars[gid*4+1] = Sf[1];
+    Rx[gid*4+2] = x1[2]; Ry[gid*4+2] = y1[2]; counts256[gid*4+2] = rf[2]; start_scalars[gid*4+2] = Sf[2];
+    Rx[gid*4+3] = x1[3]; Ry[gid*4+3] = y1[3]; counts256[gid*4+3] = rf[3]; start_scalars[gid*4+3] = Sf[3];
+    if ((rf[0] | rf[1] | rf[2] | rf[3]) != 0ull) {
         atomicAdd(d_any_left, 1u);
     }
 
@@ -369,6 +413,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     #undef MAYBE_WARP_FLUSH
     #undef WARP_FLUSH_HASHES
     #undef FLUSH_THRESHOLD
+    #undef LOAD_CENTER_SCALAR
 }
 
 // hexToLE64/hexToHash160/formatHex256/ld_from_u256 come from CUDAUtils.h,
