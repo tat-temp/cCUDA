@@ -50,6 +50,7 @@
 
 struct H160 { uint32_t w[5]; };   // 5-word hash160, returned in registers
 struct U256 { uint64_t v[4]; };   // 256-bit x-coordinate, passed in registers
+struct Hash2 { uint32_t w2a, w2b; };   // two hash160 word-2 values, returned in registers
 
 // Pack 4 limbs into the by-value carrier. __forceinline__, so this is register moves, not a copy.
 __device__ __forceinline__ U256 u256_of(const uint64_t x[4]) {
@@ -60,6 +61,43 @@ __device__ __forceinline__ U256 u256_of(const uint64_t x[4]) {
 // on RIPEMD160Transform in CUDAHash.cu). Returning one register instead of five also narrows
 // the by-value ABI described above, in the same direction that won PR#15.
 __device__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x);
+
+// ---- 2-WIDE HOT PATH: the ILP lever -------------------------------------------------------
+// Hashes TWO independent points in ONE __noinline__ call.
+//
+// WHY THIS EXISTS. Nsight (sm_120, CUDA 13.3) measures the kernel as LATENCY-bound, not
+// pipe-bound: ALU pipe 46.9%, issue slots 47.68%, IPC 2.17 of 4, and no-eligible-warp 45.74%.
+// The hash is 73% of all dynamic instructions and each SHA-256 is a 64-round serial dependency
+// chain. A warp issues IN ORDER with no speculation across CALL/RET, so the main loop's two
+// independent points (P+iG and P-iG) -- which used to make two separate __noinline__ calls --
+// were HARD-SERIALIZED: block2's SHA could not begin until block1's RET, and block1's stalls
+// could only ever be filled by OTHER warps, never by block2 of the same warp.
+//
+// Putting both chains inside ONE callee gives ptxas a single scheduling scope holding two
+// independent dependency chains, so when chain A stalls on its RAW chain, chain B's next round
+// is issuable. That is intra-warp ILP bought without adding warps (24 warps was measured WORSE:
+// it spills at the 128-reg ceiling and saturates the ALU pipe).
+//
+// WHY __noinline__ IS LOAD-BEARING HERE. Fully INLINING the 1-wide hash into the kernel was
+// measured at -6.95%: it made four inlined copies (9824 -> 18704 insns) and spilled 384/600 B
+// against the 128-register ceiling. That failure was about paying for ILP out of the KERNEL's
+// register budget. Keeping this callee __noinline__ confines its ~2x working set to its own
+// frame (SHA and RIPEMD run sequentially inside, so the frame is max(), not sum) while the
+// kernel still sees exactly one CALL. Do NOT make this __forceinline__.
+//
+// EXPECTED MAGNITUDE IS TEMPERED: RIPEMD-160 already exposes 2-way ILP internally (its two
+// independent lines a1..e1 / a2..e2) and SHA has ~2-way intra-round ILP, so this widens roughly
+// 2-way -> 4-way, not serial -> parallel. The largest marginal gain is SHA's cross-round chain.
+//
+// SCREEN BEFORE BENCHING (this is a SCHEDULING change, not a count change):
+//   * `make gate`  -- kernel <= 128 regs and 0 spill in EVERY function, this callee included.
+//   * `make sass`  -- the two chains must appear INTERLEAVED in the callee (alternating register
+//                     clusters per round). If ptxas emitted all of chain A then all of chain B,
+//                     the ILP did NOT fire and this is a null -- escalate to hand-interleaving
+//                     the round lists before spending a bench slot.
+//   * ncu          -- Executed IPC must RISE from 2.17 and no-eligible-warp must FALL from
+//                     45.74%. Both flat => it compiled but did nothing.
+__device__ Hash2 getHash160_w2_x2(uint8_t prefixA, U256 xA, uint8_t prefixB, U256 xB);
 
 // Cold path: the full 160-bit digest, for confirming a word-2 filter hit (~2^-32 of keys).
 __device__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x);

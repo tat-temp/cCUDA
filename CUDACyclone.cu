@@ -178,12 +178,26 @@ __global__ void kernel_point_add_and_check_oneinv(
         // only (the running _ModMult at each loop tail, and the final lam multiply).
         _ModInv(inverse);
 
+        // MAIN LOOP -- this is where the 2-wide hash lever lives. Both points of iteration i
+        // (P+(i+1)G and P-(i+1)G) are fully computed BEFORE either is hashed, so their two
+        // SHA/RIPEMD chains go through ONE __noinline__ call and can interleave. Previously each
+        // block made its own call, and a warp issues IN ORDER with no speculation across
+        // CALL/RET -- so block2's SHA could not begin until block1's RET, and block1's dependency
+        // stalls could only ever be filled by OTHER warps, never by block2 of the same warp.
+        // See CUDAHash.cuh for the measured rationale and the screens this must pass.
         for (int i = 0; i < half - 1; ++i) {
             uint64_t dx_inv_i[4];
             _ModMult(dx_inv_i, subp[i], inverse);
 
-            {
-                uint64_t px3[4], s[4], lam[4];
+            uint64_t px3A[4], px3B[4];
+            uint8_t  oddA, oddB;
+
+            // REGISTER DISCIPLINE: neither `lam` nor `dx_inv_i` is kept live across the hash
+            // call. Both are recomputed on the ~2^-32 found path below, which costs nothing
+            // measurable and keeps two 4-limb values (16 registers) off the call boundary --
+            // the kernel runs at 122-126 of a hard 128-register ceiling, and crossing it spills.
+            {   // block1: P + (i+1)G
+                uint64_t s[4], lam[4];
                 uint64_t px_i[4], py_i[4];
                 px_i[0]=c_Gx[(size_t)i*4+0]; px_i[1]=c_Gx[(size_t)i*4+1]; px_i[2]=c_Gx[(size_t)i*4+2]; px_i[3]=c_Gx[(size_t)i*4+3];
                 py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
@@ -191,81 +205,105 @@ __global__ void kernel_point_add_and_check_oneinv(
                 ModSub256(s, py_i, y1);
                 _ModMult(lam, s, dx_inv_i);
 
-                _ModSqr(px3, lam);
-                ModSub256_2(px3, px3, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
+                _ModSqr(px3A, lam);
+                ModSub256_2(px3A, px3A, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
 
-                ModSub256(s, x1, px3); 
+                ModSub256(s, x1, px3A);
                 _ModMult(s, s, lam);
-                uint8_t odd; ModSub256isOdd(s, y1, &odd);
-
-                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = (hw2 == target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
-                    if (full) {
-                        if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
-                            uint64_t addv=(uint64_t)(i+1);
-                            { uint64_t old=fs[0]; fs[0]=old+addv; addv=(fs[0]<old)?1ull:0ull; }
-                            { uint64_t old=fs[1]; fs[1]=old+addv; addv=(fs[1]<old)?1ull:0ull; }
-                            { uint64_t old=fs[2]; fs[2]=old+addv; addv=(fs[2]<old)?1ull:0ull; }
-                            { uint64_t old=fs[3]; fs[3]=old+addv; addv=(fs[3]<old)?1ull:0ull; }
-                            d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
-                            d_found_result->Rx[0]=px3[0]; d_found_result->Rx[1]=px3[1]; d_found_result->Rx[2]=px3[2]; d_found_result->Rx[3]=px3[3];
-                           
-                            uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
-                            d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
-                            __threadfence_system();
-                            atomicExch(d_found_flag, FOUND_READY);
-                        }
-                    }
-                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                    // collision must keep scanning, else the skipped write-back drops keys.
-                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
-                }
+                ModSub256isOdd(s, y1, &oddA);
             }
 
-            {
-                uint64_t px3[4], s[4], lam[4];
+            {   // block2: P - (i+1)G
+                uint64_t s[4], lam[4];
                 uint64_t px_i[4], py_i[4];
                 px_i[0]=c_Gx[(size_t)i*4+0]; px_i[1]=c_Gx[(size_t)i*4+1]; px_i[2]=c_Gx[(size_t)i*4+2]; px_i[3]=c_Gx[(size_t)i*4+3];
                 py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
-                ModNeg256(py_i, py_i); 
+                ModNeg256(py_i, py_i);
 
                 ModSub256(s, py_i, y1);
                 _ModMult(lam, s, dx_inv_i);
 
-                _ModSqr(px3, lam);
-                ModSub256_2(px3, px3, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
+                _ModSqr(px3B, lam);
+                ModSub256_2(px3B, px3B, x1, px_i);   // px3 = lam^2 - x1 - px_i (fused, one reduction)
 
-                ModSub256(s, x1, px3);
+                ModSub256(s, x1, px3B);
                 _ModMult(s, s, lam);
-                uint8_t odd; ModSub256isOdd(s, y1, &odd);
+                ModSub256isOdd(s, y1, &oddB);
+            }
 
-                uint32_t hw2 = getHash160_w2_from_limbs(odd?0x03:0x02, u256_of(px3));
-                bool pref = (hw2 == target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    bool full = pref && hash160_full_match(odd?0x03:0x02, u256_of(px3), c_target_words);
-                    if (full) {
-                        if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
-                            uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
-                            uint64_t sub=(uint64_t)(i+1);
-                            { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[2]; fs[2]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            { uint64_t old=fs[3]; fs[3]=old-sub; sub=(old<sub)?1ull:0ull; }
-                            d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
-                            d_found_result->Rx[0]=px3[0]; d_found_result->Rx[1]=px3[1]; d_found_result->Rx[2]=px3[2]; d_found_result->Rx[3]=px3[3];
-                            uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
-                            d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
-                            __threadfence_system();
-                            atomicExch(d_found_flag, FOUND_READY);
-                        }
+            const uint8_t prefA = oddA ? 0x03 : 0x02;
+            const uint8_t prefB = oddB ? 0x03 : 0x02;
+            Hash2 hw = getHash160_w2_x2(prefA, u256_of(px3A), prefB, u256_of(px3B));
+            bool prefHitA = (hw.w2a == target_prefix);
+            bool prefHitB = (hw.w2b == target_prefix);
+
+            // ONE warp-uniform gate covering BOTH candidates, and ONE exit. Splitting this into
+            // two independent __any_sync/return blocks would restore the divergent-early-return
+            // shape behind the historical prefix-collision key-skip bug (PR#5): a lane that
+            // returns while a sibling lane still owes its state write-back drops keys.
+            // __any_sync is warp-uniform, so every lane enters and every lane leaves together.
+            if (__any_sync(full_mask, prefHitA || prefHitB)) {
+                bool fullA = prefHitA && hash160_full_match(prefA, u256_of(px3A), c_target_words);
+                bool fullB = prefHitB && hash160_full_match(prefB, u256_of(px3B), c_target_words);
+
+                // BOTH candidates attempt the CAS, so a real match is never dropped; the CAS
+                // itself arbitrates if two lanes -- or A and B of one lane -- match at once.
+                if (fullA) {
+                    if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
+                        uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
+                        uint64_t addv=(uint64_t)(i+1);
+                        { uint64_t old=fs[0]; fs[0]=old+addv; addv=(fs[0]<old)?1ull:0ull; }
+                        { uint64_t old=fs[1]; fs[1]=old+addv; addv=(fs[1]<old)?1ull:0ull; }
+                        { uint64_t old=fs[2]; fs[2]=old+addv; addv=(fs[2]<old)?1ull:0ull; }
+                        { uint64_t old=fs[3]; fs[3]=old+addv; addv=(fs[3]<old)?1ull:0ull; }
+                        d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
+                        d_found_result->Rx[0]=px3A[0]; d_found_result->Rx[1]=px3A[1]; d_found_result->Rx[2]=px3A[2]; d_found_result->Rx[3]=px3A[3];
+
+                        // Rebuild block1's lam exactly as the block above did. dx_inv_i is
+                        // recomputed here rather than kept live: `inverse` is not advanced until
+                        // the loop tail, so subp[i] * inverse still reproduces it exactly.
+                        uint64_t dxi[4]; _ModMult(dxi, subp[i], inverse);
+                        uint64_t s[4], lam[4], py_i[4];
+                        py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
+                        ModSub256(s, py_i, y1);
+                        _ModMult(lam, s, dxi);
+
+                        uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3A); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
+                        d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
+                        __threadfence_system();
+                        atomicExch(d_found_flag, FOUND_READY);
                     }
-                    // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
-                    // collision must keep scanning, else the skipped write-back drops keys.
-                    if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
                 }
+
+                if (fullB) {
+                    if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
+                        uint64_t fs[4]; fs[0]=S[0]; fs[1]=S[1]; fs[2]=S[2]; fs[3]=S[3];
+                        uint64_t sub=(uint64_t)(i+1);
+                        { uint64_t old=fs[0]; fs[0]=old-sub; sub=(old<sub)?1ull:0ull; }
+                        { uint64_t old=fs[1]; fs[1]=old-sub; sub=(old<sub)?1ull:0ull; }
+                        { uint64_t old=fs[2]; fs[2]=old-sub; sub=(old<sub)?1ull:0ull; }
+                        { uint64_t old=fs[3]; fs[3]=old-sub; sub=(old<sub)?1ull:0ull; }
+                        d_found_result->scalar[0]=fs[0]; d_found_result->scalar[1]=fs[1]; d_found_result->scalar[2]=fs[2]; d_found_result->scalar[3]=fs[3];
+                        d_found_result->Rx[0]=px3B[0]; d_found_result->Rx[1]=px3B[1]; d_found_result->Rx[2]=px3B[2]; d_found_result->Rx[3]=px3B[3];
+
+                        // Rebuild block2's lam -- note the negated Gy, matching the block above.
+                        uint64_t dxi[4]; _ModMult(dxi, subp[i], inverse);
+                        uint64_t s[4], lam[4], py_i[4];
+                        py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
+                        ModNeg256(py_i, py_i);
+                        ModSub256(s, py_i, y1);
+                        _ModMult(lam, s, dxi);
+
+                        uint64_t y3[4]; uint64_t t[4]; ModSub256(t, x1, px3B); _ModMult(y3, t, lam); ModSub256(y3, y3, y1);
+                        d_found_result->Ry[0]=y3[0]; d_found_result->Ry[1]=y3[1]; d_found_result->Ry[2]=y3[2]; d_found_result->Ry[3]=y3[3];
+                        __threadfence_system();
+                        atomicExch(d_found_flag, FOUND_READY);
+                    }
+                }
+
+                // Abandon the launch only on a real full-hash160 match; a bare 32-bit prefix
+                // collision must keep scanning, else the skipped write-back drops keys.
+                if (__any_sync(full_mask, fullA || fullB)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
             }
 
             uint64_t gxmi[4];

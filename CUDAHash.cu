@@ -572,6 +572,36 @@ __device__ __noinline__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U
     return RIPEMD160_w2_from_SHA256_state(sha_state);
 }
 
+// 2-WIDE HOT PATH. Two independent points, one CALL -- see CUDAHash.cuh for the measured
+// rationale (latency-bound at 16 warps; two separate __noinline__ calls are hard-serialized by
+// CALL/RET, so block2 could never fill block1's dependency stalls).
+//
+// BIT-EXACT BY CONSTRUCTION: this calls the SAME __forceinline__ SHA256_33_from_limbs and
+// RIPEMD160_w2_from_SHA256_state bodies the 1-wide path uses, on the same inputs, so
+// getHash160_w2_x2(pA,xA,pB,xB) == { getHash160_w2_from_limbs(pA,xA),
+// getHash160_w2_from_limbs(pB,xB) } identically. No new hash arithmetic is introduced and the
+// round lists are untouched, so the word-2 trim's "where each register is last written" proof
+// still holds unchanged. The ONLY new thing here is the scheduling scope.
+//
+// ORDER IS THE WHOLE POINT: both SHA chains first (adjacent and mutually independent), then both
+// RIPEMD chains. Writing SHA(A);RIPEMD(A);SHA(B);RIPEMD(B) instead would recreate the serial
+// shape -- A's RIPEMD depends on A's SHA, so nothing independent would sit adjacent to fill the
+// stalls, and the merge would buy nothing over the two calls it replaces.
+//
+// Each chain keeps its OWN 16-word state array: SHA writes [0..7] and RIPEMD160_PAD_TAIL writes
+// [8..15] of the same buffer (exactly as in the 1-wide path), so the two must not share one.
+__device__ __noinline__ Hash2 getHash160_w2_x2(uint8_t prefixA, U256 xA, uint8_t prefixB, U256 xB)
+{
+    uint32_t shaA[16], shaB[16];
+    SHA256_33_from_limbs(prefixA, xA.v, shaA);
+    SHA256_33_from_limbs(prefixB, xB.v, shaB);
+
+    Hash2 r;
+    r.w2a = RIPEMD160_w2_from_SHA256_state(shaA);
+    r.w2b = RIPEMD160_w2_from_SHA256_state(shaB);
+    return r;
+}
+
 // BY-VALUE ABI (x in by value, hash160 out by value) -- see CUDAHash.cuh for the measured effect
 // and why this must not be reverted to pointers. __noinline__ is deliberate: the CALL is kept,
 // only its ABI changed. The body is unchanged from the pointer version, so the hash is bit-exact.
