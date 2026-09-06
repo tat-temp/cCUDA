@@ -32,6 +32,14 @@ FLAGS="-O1 -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function"
 DEFS="-D__device__= -D__forceinline__=inline -D__noinline__= -D__global__="
 INCS="-I$HERE -I$REPO"
 
+# Only some branches carry a 2-wide hash entry point. Detect it rather than forking the harness:
+# a tree that does not touch the hash still wants the KAT, because difftest's result rests on the
+# host emulation being faithful.
+if grep -q 'getHash160_w2_x2' "$REPO/CUDAHash.cuh"; then
+    DEFS="$DEFS -DHAVE_HASH2_X2"
+    echo "   (tree has getHash160_w2_x2 -- 2-wide equivalence enabled)"
+fi
+
 echo "== 1/2: hash equivalence (real hash on the host) =="
 "$CXX" $FLAGS $DEFS $INCS "$HERE/test_x2.cpp" -o "$HERE/test_x2.exe"
 "$HERE/test_x2.exe"

@@ -5,8 +5,12 @@
 // Proves, on the host:
 //   1. KAT: getHash160_w2_from_limbs(0x02, Gx) == word 2 of hash160(02||Gx)
 //      (privkey 1 -> 751e76e8199196d454941c45d1b3a323f1433bd6 -> word2 = 0x451c9454)
-//   2. getHash160_w2_x2(pA,xA,pB,xB) == { w2(pA,xA), w2(pB,xB) }  -- the new 2-wide entry
-//   3. getHash160_w2_from_limbs(p,x) == getHash160_33_from_limbs(p,x).w[2]  -- the trim invariant
+//   2. getHash160_w2_from_limbs(p,x) == getHash160_33_from_limbs(p,x).w[2]  -- the trim invariant
+//   3. only where the tree HAS a 2-wide entry point (run.sh passes -DHAVE_HASH2_X2 when
+//      CUDAHash.cuh declares one): getHash160_w2_x2(pA,xA,pB,xB) == { w2(pA,xA), w2(pB,xB) }
+//
+// The KAT is what makes the host emulation trustworthy, and difftest.cpp's whole result rests on
+// that -- so this stays worth running even on a tree that never touches the hash.
 
 #include <cstdint>
 #include <cstdio>
@@ -76,12 +80,16 @@ int main()
 
         uint32_t w2a = getHash160_w2_from_limbs(pA, a);
         uint32_t w2b = getHash160_w2_from_limbs(pB, b);
+#ifdef HAVE_HASH2_X2
         Hash2 h2 = getHash160_w2_x2(pA, a, pB, b);
 
         if (h2.w2a != w2a || h2.w2b != w2b) {
             printf("FAIL x2 at n=%ld: (%08x,%08x) != (%08x,%08x)\n", n, h2.w2a, h2.w2b, w2a, w2b);
             ++fail; break;
         }
+#else
+        (void)w2b;
+#endif
         // the word-2 trim invariant, on a subset (the full path is much more expensive)
         if ((n & 0x3FF) == 0) {
             H160 full = getHash160_33_from_limbs(pA, a);
@@ -92,7 +100,11 @@ int main()
         }
         ++checked;
     }
+#ifdef HAVE_HASH2_X2
     if (!fail) printf("PASS x2    : %ld random pairs, getHash160_w2_x2 == two 1-wide calls\n", checked);
+#else
+    if (!fail) printf("SKIP x2    : this tree has no getHash160_w2_x2 (1-wide hash only)\n");
+#endif
     if (!fail) printf("PASS trim  : sampled full.w[2] == w2 on %ld cases\n", checked / 1024 + 1);
 
     // ---- edge cases: aliasing-ish and extremes ----
@@ -101,21 +113,26 @@ int main()
     struct { U256 x; uint8_t p; } edges[] = {
         {zero, 0x02}, {zero, 0x03}, {ones, 0x02}, {ones, 0x03}, {Gx, 0x03},
     };
-    for (int i = 0; i < 5 && !fail; ++i)
+    for (int i = 0; i < 5 && !fail; ++i) {
+        uint32_t ea = getHash160_w2_from_limbs(edges[i].p, edges[i].x);
+        H160 ef = getHash160_33_from_limbs(edges[i].p, edges[i].x);
+        if (ef.w[2] != ea) { printf("FAIL edge trim %d: %08x != %08x\n", i, ef.w[2], ea); ++fail; }
+#ifdef HAVE_HASH2_X2
         for (int j = 0; j < 5 && !fail; ++j) {
             Hash2 h2 = getHash160_w2_x2(edges[i].p, edges[i].x, edges[j].p, edges[j].x);
-            uint32_t ea = getHash160_w2_from_limbs(edges[i].p, edges[i].x);
             uint32_t eb = getHash160_w2_from_limbs(edges[j].p, edges[j].x);
             if (h2.w2a != ea || h2.w2b != eb) { printf("FAIL edge (%d,%d)\n", i, j); ++fail; }
         }
-    if (!fail) printf("PASS edges : 25 edge combinations\n");
-
-    // ---- same-input-both-lanes (the singleton-routing shape, and a self-consistency check) ----
-    for (int i = 0; i < 5 && !fail; ++i) {
-        Hash2 h2 = getHash160_w2_x2(edges[i].p, edges[i].x, edges[i].p, edges[i].x);
-        if (h2.w2a != h2.w2b) { printf("FAIL dup lane %d: %08x != %08x\n", i, h2.w2a, h2.w2b); ++fail; }
+        // same input on both lanes: the singleton-routing shape, and a self-consistency check
+        Hash2 hd = getHash160_w2_x2(edges[i].p, edges[i].x, edges[i].p, edges[i].x);
+        if (hd.w2a != hd.w2b) { printf("FAIL dup lane %d: %08x != %08x\n", i, hd.w2a, hd.w2b); ++fail; }
+#endif
     }
-    if (!fail) printf("PASS dup   : identical inputs give identical lanes\n");
+#ifdef HAVE_HASH2_X2
+    if (!fail) printf("PASS edges : 25 edge combinations, both lanes and the trim invariant\n");
+#else
+    if (!fail) printf("PASS edges : 5 edge inputs, trim invariant holds at the extremes\n");
+#endif
 
     printf(fail ? "\nRESULT: FAIL (%d)\n" : "\nRESULT: ALL PASS\n", fail);
     return fail ? 1 : 0;

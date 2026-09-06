@@ -74,6 +74,14 @@ static inline void sub256_u64_inplace(uint64_t a[4], uint64_t dec)
     { uint64_t t = a[2]; a[2] = t - br; br = (t < br) ? 1ull : 0ull; }
     { uint64_t t = a[3]; a[3] = t - br; br = (t < br) ? 1ull : 0ull; }
 }
+static inline void add256_u64_inplace(uint64_t a[4], uint64_t inc)
+{
+    uint64_t old = a[0]; a[0] = old + inc;
+    uint64_t c = (a[0] < old) ? 1ull : 0ull;
+    { uint64_t t = a[1]; a[1] = t + c; c = (a[1] < t) ? 1ull : 0ull; }
+    { uint64_t t = a[2]; a[2] = t + c; c = (a[2] < t) ? 1ull : 0ull; }
+    { uint64_t t = a[3]; a[3] = t + c; c = (a[3] < t) ? 1ull : 0ull; }
+}
 static inline unsigned long long warp_reduce_add_ull(unsigned long long v) { return v; }
 
 // ---- deterministic, alias-safe stand-ins for the PTX field ops -----------------------------
@@ -112,8 +120,12 @@ static void logrec(uint8_t p, const U256& x)
 { if (g_log) { Rec r; r.p = p; for (int i = 0; i < 4; ++i) r.x[i] = x.v[i]; g_log->push_back(r); } }
 
 static uint32_t HOOK_w2(uint8_t p, U256 x) { logrec(p, x); return getHash160_w2_from_limbs(p, x); }
+#ifdef HAVE_HASH2_X2
+// Only defined where the tree has a 2-wide entry point; extract2.py reports how many call sites
+// each side actually has, so a tree with none simply never reaches this.
 static Hash2 HOOK_w2x2(uint8_t pA, U256 xA, uint8_t pB, U256 xB)
 { logrec(pA, xA); logrec(pB, xB); return getHash160_w2_x2(pA, xA, pB, xB); }
+#endif
 
 __device__ __forceinline__ bool hash160_full_match(uint8_t prefix02_03, U256 x, const uint32_t target_w[5])
 { H160 h5 = getHash160_33_from_limbs(prefix02_03, x); return hash160_matches_full(h5.w, target_w); }
@@ -146,14 +158,15 @@ static void setup_tables()
 }
 
 template <typename KFn>
-static void run(KFn kfn, const uint32_t target[5], RunOut& out)
+static void run(KFn kfn, const uint32_t target[5], RunOut& out,
+                uint64_t rem_keys = (uint64_t)B_TEST * 3ull, uint32_t maxbatch = MAXBATCH)
 {
     uint64_t Px[4], Py[4], Rx[4] = {0}, Ry[4] = {0}, S[4], cnt[4];
     for (int j = 0; j < 4; ++j) {
         Px[j] = mix64(0x5000 + j);
         Py[j] = mix64(0x6000 + j);
         S[j]  = (j == 0) ? 100000ull : 0ull;
-        cnt[j] = (j == 0) ? (uint64_t)B_TEST * 3ull : 0ull;
+        cnt[j] = (j == 0) ? rem_keys : 0ull;
     }
     int flag = FOUND_NONE;
     FoundResult fr{};
@@ -163,7 +176,7 @@ static void run(KFn kfn, const uint32_t target[5], RunOut& out)
 
     out.log.clear();
     g_log = &out.log;
-    kfn(Px, Py, Rx, Ry, S, cnt, THREADS, B_TEST, MAXBATCH, &flag, &fr, &hashes, &anyleft);
+    kfn(Px, Py, Rx, Ry, S, cnt, THREADS, B_TEST, maxbatch, &flag, &fr, &hashes, &anyleft);
     g_log = nullptr;
 
     out.flag = flag; out.res = fr; out.hashes = hashes; out.anyleft = anyleft;
@@ -214,6 +227,37 @@ int main()
         printf("  FAIL: hash counter/any_left differ (%llu/%u vs %llu/%u)\n",
                o1.hashes, o1.anyleft, n1.hashes, n1.anyleft); ++fail;
     } else printf("  PASS: identical hash counter (%llu) and any_left (%u)\n", o1.hashes, o1.anyleft);
+
+    // ---- Test 1b: batch-count boundaries ----
+    // The loop condition changed from `ge256_u64(rem, B)` evaluated per batch to a precomputed
+    // uint32 limit, so sweep the cases where the two could disagree: exact exhaustion, a
+    // max_batches_per_launch-limited run with remainder left over, a rem-limited run, a rem that
+    // is NOT a whole multiple of B (floor division), fewer keys than one batch, and rem == 0
+    // (the early-return path, which deliberately does not write counts/scalars).
+    struct Cfg { uint64_t rem_keys; uint32_t maxb; const char* what; };
+    const Cfg cfgs[] = {
+        {(uint64_t)B_TEST * 3ull,      3, "exact exhaust"},
+        {(uint64_t)B_TEST * 5ull,      2, "max-limited, remainder left"},
+        {(uint64_t)B_TEST * 2ull,      5, "rem-limited"},
+        {(uint64_t)B_TEST * 2ull + 8,  5, "rem not a multiple of B"},
+        {8ull,                         5, "fewer keys than one batch"},
+        {0ull,                         5, "rem == 0, early return"},
+    };
+    printf("\nTest 1b (batch-count boundaries)\n");
+    for (const Cfg& c : cfgs) {
+        RunOut ob, nb;
+        run(kernel_old, no_match, ob, c.rem_keys, c.maxb);
+        run(kernel_new, no_match, nb, c.rem_keys, c.maxb);
+        bool ok = ob.log.size() == nb.log.size()
+                  && same_log(ob.log, nb.log, ob.log.size(), c.what)
+                  && memcmp(ob.Rx, nb.Rx, 32) == 0 && memcmp(ob.Ry, nb.Ry, 32) == 0
+                  && memcmp(ob.scal, nb.scal, 32) == 0 && memcmp(ob.cnt, nb.cnt, 32) == 0
+                  && ob.hashes == nb.hashes && ob.anyleft == nb.anyleft;
+        printf("  %-30s rem=%3llu max=%u -> %2zu hashed, any_left=%u  %s\n",
+               c.what, (unsigned long long)c.rem_keys, c.maxb, ob.log.size(), ob.anyleft,
+               ok ? "PASS" : "FAIL");
+        if (!ok) ++fail;
+    }
 
     // ---- Test 2: plant each candidate in turn as the target; both must find the same key ----
     printf("\nTest 2 (planted targets): %zu candidates\n", o1.log.size());
