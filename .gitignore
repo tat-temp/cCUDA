@@ -15,7 +15,7 @@
 /ptxas-gate.log
 
 # importing proof.py from a test script leaves this behind
-/__pycache__/
+__pycache__/
 
 # tools/hashtest generated artifacts (extracted kernels + host test binaries)
 /tools/hashtest/kernel_old.inc
