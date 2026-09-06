@@ -5,7 +5,15 @@ TARGET      := CUDACyclone
 SRC         := CUDACyclone.cu
 OBJ         := $(SRC:.cu=.o)
 HDRS        := $(wildcard *.h *.cuh)
-CC          := nvcc
+# nvcc is routinely NOT on PATH on a freshly rented box -- it lives in /usr/local/cuda/bin, which
+# the default login profile does not add -- while nvidia-smi IS. So GPU_ARCH detects fine and the
+# build then dies with "nvcc: not found" several steps later. That has cost a round trip twice.
+# Look in the usual places instead of requiring the caller to fix PATH first. An nvcc that IS on
+# PATH still wins, and `make CC=/path/to/nvcc` overrides both (command-line assignment beats this).
+# /usr/local/cuda is checked first because it is the symlink to the box's chosen default; the
+# versioned fallbacks after it resolve in glob order, so on a box with several CUDA versions and
+# no symlink, pass CC= explicitly rather than trusting which one is picked.
+CC := $(if $(shell command -v nvcc 2>/dev/null),nvcc,$(firstword $(wildcard /usr/local/cuda/bin/nvcc /usr/local/cuda-*/bin/nvcc /opt/cuda/bin/nvcc)))
 
 # Native arch, auto-detected. `?=` so it can be set explicitly on a box where nvidia-smi is
 # absent or not on PATH:  make GPU_ARCH=120
@@ -22,6 +30,11 @@ NOARCH_OK := clean
 ifneq ($(filter-out $(NOARCH_OK),$(or $(MAKECMDGOALS),all)),)
   ifeq ($(strip $(GPU_ARCH)),)
     $(error could not detect GPU compute capability (nvidia-smi missing, off PATH, or returned nothing). Pass it explicitly: make GPU_ARCH=120)
+  endif
+  # Same idea for the compiler: fail here, naming the fix, rather than 40 lines later with a
+  # bare "nvcc: not found" from /bin/sh.
+  ifeq ($(strip $(CC)),)
+    $(error nvcc not found on PATH nor in /usr/local/cuda/bin, /usr/local/cuda-*/bin or /opt/cuda/bin. Fix PATH (export PATH=/usr/local/cuda/bin:$$PATH) or pass it: make CC=/path/to/nvcc)
   endif
 endif
 
