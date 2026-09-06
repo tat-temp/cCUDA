@@ -12,18 +12,23 @@ rather than "you are looking it up wrong". The bodies have to be found by their 
 target offsets, and those offsets MOVE on every code-size change, so they must be re-derived each
 time rather than hardcoded. This project has been bitten by that repeatedly.
 
-WHAT IT MEASURES. The 2-wide hash is a pure SCHEDULING change: same instructions, different order.
-So instruction counts cannot tell you whether it worked. Dependence distance can.
+WHAT IT MEASURES. The 2-wide hash is a pure SCHEDULING change -- same instructions, different
+order -- so instruction counts cannot tell you whether it worked. Producer-to-consumer dependence
+distance can.
 
-In a single serial dependency chain (one SHA-256), each instruction consumes a value produced by
-the instruction immediately before it, so the producer->consumer distance is mostly 1. If ptxas
-interleaves two INDEPENDENT chains, consecutive instructions alternate between them and the
-typical distance becomes 2 or more.
+READ THE MEAN-DISTANCE RATIO, NOT A dist=1 COUNT. The first version of this script tested whether
+the dist=1 fraction fell, on the assumption that one hash is a naive serial chain. That assumption
+is WRONG and the test is worthless here: measured on real SASS, a single 1-wide hash already has
+only 0.1% of its dependences at distance 1 and a MEAN distance of ~26, because ptxas already
+schedules each hash with substantial internal slack (SHA's message schedule, RIPEMD's two parallel
+lines, independent sub-expressions within a round). That script reported the right answer for the
+wrong reason -- a trap worth not re-laying.
 
-The 1-wide callee is the built-in control: it is inherently serial, so its distance-1 fraction is
-the "not interleaved" baseline. If the 2-wide body shows a markedly LOWER distance-1 fraction than
-the 1-wide body, the interleave fired. If the two are about equal, ptxas serialized the chains and
-the lever is a null -- escalate to hand-interleaving the round lists.
+The sound test: interleaving two INDEPENDENT chains inserts one chain's instructions between the
+other chain's producer/consumer pairs, so the mean distance should roughly DOUBLE. Emitting the
+chains back to back leaves each chain's internal schedule untouched, so the mean is unchanged
+while the body is ~2x the size. Size ratio says "both chains are here"; distance ratio says
+"and they are woven together".
 """
 import re
 import subprocess
@@ -51,11 +56,7 @@ def dump_sass():
 
 
 def parse(text):
-    out = []
-    for m in INSN_RE.finditer(text):
-        off, op, ops = int(m.group(1), 16), m.group(2), m.group(3)
-        out.append((off, op, ops))
-    return out
+    return [(int(m.group(1), 16), m.group(2), m.group(3)) for m in INSN_RE.finditer(text)]
 
 
 def body_at(insns, start_off):
@@ -72,7 +73,7 @@ def body_at(insns, start_off):
 
 
 def distance_hist(body):
-    """Producer->consumer distance for each instruction, in instructions."""
+    """For each instruction, distance back to the nearest producer of any source register."""
     last_write = {}
     dists = []
     for i, (_off, op, ops) in enumerate(body):
@@ -84,11 +85,9 @@ def distance_hist(body):
         best = None
         for s in srcs:
             for rm in REG_RE.finditer(s):
-                r = rm.group(1)
-                if r in last_write:
-                    d = i - last_write[r]
-                    if best is None or d < best:
-                        best = d
+                d = i - last_write.get(rm.group(1), -10**9)
+                if d < 10**8 and (best is None or d < best):
+                    best = d
         if best is not None:
             dists.append(best)
         if dst:
@@ -100,16 +99,15 @@ def distance_hist(body):
 def report(name, body):
     d = distance_hist(body)
     if not d:
-        print("  %-22s (no measurable dependences)" % name)
+        print("  %-14s (no measurable dependences)" % name)
         return None
     n = len(d)
-    at1 = sum(1 for x in d if x == 1) / n
-    at2 = sum(1 for x in d if x == 2) / n
-    ge3 = sum(1 for x in d if x >= 3) / n
     mean = sum(d) / n
-    print("  %-22s %5d insn | dist=1 %5.1f%% | dist=2 %5.1f%% | dist>=3 %5.1f%% | mean %.2f"
-          % (name, len(body), 100 * at1, 100 * at2, 100 * ge3, mean))
-    return at1
+    print("  %-14s %5d insn | dist=1 %5.1f%% | dist=2 %5.1f%% | dist>=3 %5.1f%% | mean %6.2f"
+          % (name, len(body), 100 * sum(1 for x in d if x == 1) / n,
+             100 * sum(1 for x in d if x == 2) / n,
+             100 * sum(1 for x in d if x >= 3) / n, mean))
+    return mean
 
 
 def main():
@@ -120,43 +118,52 @@ def main():
         return 1
 
     targets = sorted({int(t, 16) for t in re.findall(r"CALL\.REL\.NOINC\s+0x([0-9a-f]+)", text)})
-    print("CALL.REL.NOINC targets found: %s"
-          % ", ".join("0x%x" % t for t in targets) if targets else "none")
     if not targets:
         print("No intra-module calls -- the hash may have been inlined. Check CUDAHash.cuh.")
         return 1
+    print("CALL.REL.NOINC targets: %s" % ", ".join("0x%x" % t for t in targets))
 
-    bodies = [(t, body_at(insns, t)) for t in targets]
-    bodies = [(t, b) for t, b in bodies if b]
+    bodies = [(t, b) for t, b in ((t, body_at(insns, t)) for t in targets) if b]
     bodies.sort(key=lambda tb: -len(tb[1]))
 
-    print("\nCallee bodies by size (largest should be the 2-wide getHash160_w2_x2):")
-    fracs = []
-    for t, b in bodies:
-        fracs.append((len(b), report("0x%x" % t, b)))
+    print("")
+    print("Callee bodies by size (largest should be the 2-wide getHash160_w2_x2):")
+    stats = [(len(b), report("0x%x" % t, b)) for t, b in bodies]
 
-    print("\nINTERPRETATION")
-    if len(bodies) < 2:
-        print("  Only one callee body found; cannot compare against the 1-wide control.")
+    print("")
+    print("INTERPRETATION")
+    usable = [(n, m) for n, m in stats if m is not None and n > 200]
+    if len(usable) < 2:
+        print("  Not enough comparable bodies.")
         return 0
-    big_n, big_f = fracs[0]
-    ctl = [f for f in fracs[1:] if f[1] is not None]
-    if big_f is None or not ctl:
-        print("  Not enough data.")
-        return 0
-    ctl_n, ctl_f = ctl[0]
-    print("  2-wide body : %d insn, dist-1 %.1f%%" % (big_n, 100 * big_f))
-    print("  1-wide ctrl : %d insn, dist-1 %.1f%%" % (ctl_n, 100 * ctl_f))
-    print("  size ratio  : %.2fx (expect ~2x if both chains are present)" % (big_n / max(ctl_n, 1)))
-    drop = ctl_f - big_f
-    if drop > 0.10:
-        print("  => INTERLEAVE FIRED. The 2-wide body's dependence distances are markedly longer,")
-        print("     which is what alternating between two independent chains looks like.")
-    elif drop > 0.03:
-        print("  => PARTIAL. Some interleaving, but less than a clean 2-way alternation.")
+    (big_n, big_m), (ctl_n, ctl_m) = usable[0], usable[1]
+    size_ratio = big_n / max(ctl_n, 1)
+    dist_ratio = big_m / max(ctl_m, 1e-9)
+    print("  2-wide body : %5d insn, mean dependence distance %6.2f" % (big_n, big_m))
+    print("  1-wide ctrl : %5d insn, mean dependence distance %6.2f" % (ctl_n, ctl_m))
+    print("  size ratio  : %.2fx  (expect ~2x: both chains present)" % size_ratio)
+    print("  DISTANCE    : %.2fx  (the decisive number -- expect ~2x if woven together)" % dist_ratio)
+    print("")
+    print("  Do NOT read the dist=1 column as the verdict. ptxas already schedules a single hash")
+    print("  with ~%.0f instructions of producer-to-consumer slack, so dist=1 is near zero in BOTH"
+          % ctl_m)
+    print("  bodies whether or not the chains were interleaved.")
+    print("")
+    if size_ratio < 1.5:
+        print("  => INCONCLUSIVE: the large body is not ~2x, so it may not hold both chains.")
+    elif dist_ratio > 1.6:
+        print("  => INTERLEAVE FIRED. Distances stretched as expected for 2-way alternation.")
+    elif dist_ratio > 1.2:
+        print("  => PARTIAL interleaving -- coarser than a clean alternation.")
     else:
-        print("  => NOT INTERLEAVED. ptxas emitted the chains back to back, so this is a NULL:")
-        print("     no register work will save it. Escalate to hand-interleaving the round lists.")
+        print("  => NOT INTERLEAVED. Both chains are present (~2x size) but each kept its own")
+        print("     internal schedule: ptxas emitted them back to back. A warp issues IN ORDER,")
+        print("     so chain B cannot fill chain A's stalls. This is a NULL, and no amount of")
+        print("     register work changes it.")
+        print("")
+        print("     Before escalating to hand-interleaved round lists, weigh this: a mean distance")
+        print("     of ~%.0f means each hash ALREADY carries substantial internal ILP, which" % ctl_m)
+        print("     undercuts the premise that the hash is starved of independent work.")
     return 0
 
 
