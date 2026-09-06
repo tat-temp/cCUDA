@@ -16,3 +16,8 @@
 
 # importing proof.py from a test script leaves this behind
 /__pycache__/
+
+# tools/hashtest generated artifacts (extracted kernels + host test binaries)
+/tools/hashtest/kernel_old.inc
+/tools/hashtest/kernel_new.inc
+/tools/hashtest/*.exe
